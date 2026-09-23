@@ -105,6 +105,27 @@ impl Glass {
         self.rim(painter, rect, radius);
     }
 
+    /// Reserve a card's background before its content is drawn. Cards are a
+    /// plain film (no frost), so unlike chrome they need no last-frame rect:
+    /// `fill_card` sets the reserved shapes to this frame's size, no jitter.
+    pub fn card_slot(&self, ui: &Ui) -> [egui::layers::ShapeIdx; 2] {
+        [ui.painter().add(egui::Shape::Noop), ui.painter().add(egui::Shape::Noop)]
+    }
+
+    pub fn fill_card(&self, ui: &Ui, slot: [egui::layers::ShapeIdx; 2], rect: Rect, radius: u8) {
+        let t = &self.theme;
+        let shadow = Shadow { offset: [0, 4], blur: 16, spread: 0, color: t.shadow };
+        ui.painter().set(slot[0], shadow.as_shape(rect, radius));
+        let fill = if self.reduce_transparency {
+            t.raised
+        } else {
+            let [r, g, b, a] = t.card_tint;
+            Color32::from_rgba_unmultiplied(r, g, b, a)
+        };
+        ui.painter().set(slot[1], egui::epaint::RectShape::filled(rect, radius, fill));
+        self.rim(ui.painter(), rect, radius);
+    }
+
     /// Top-lit hairline (light falls from above) + a thin specular line.
     fn rim(&self, painter: &Painter, rect: Rect, radius: u8) {
         let t = &self.theme;

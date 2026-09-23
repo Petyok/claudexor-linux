@@ -3,17 +3,23 @@
 //! never raw hex.
 
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, TextStyle};
+use super::icons;
 use std::sync::Arc;
 
-pub const R_SM: u8 = 14; // chips, rows, code wells
-pub const R_MD: u8 = 20; // cards, sidebar
-pub const R_LG: u8 = 28; // floating composer
+// Radius ladder (DESIGN_SYSTEM §2.4 / DesignTokens): control 8 · card 12 · bubble 16 · hero 22.
+pub const R_SM: u8 = 8; // controls, chips, rows, code wells
+pub const R_MD: u8 = 12; // cards, sidebar, popovers
+pub const R_BUBBLE: u8 = 16; // the user's message bubble
+pub const R_LG: u8 = 22; // floating composer
 pub const SP: f32 = 4.0; // spacing scale unit: 4, 8, 12, 16, 24, 32
-pub const T_SMALL: f32 = 13.0;
-pub const T_BODY: f32 = 15.0;
-pub const T_TITLE: f32 = 20.0;
+// Type scale: body 14 · callout 13 · caption 12 · caption2 11 · title 18.
+pub const T_BODY: f32 = 14.0;
+pub const T_CALLOUT: f32 = 13.0;
+pub const T_SMALL: f32 = 12.0;
+pub const T_CAPTION: f32 = 11.0;
+pub const T_TITLE: f32 = 18.0;
 pub const SIDEBAR_W: f32 = 260.0;
-pub const MEASURE: f32 = 760.0;
+pub const MEASURE: f32 = 680.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
@@ -134,16 +140,16 @@ impl Theme {
     /// Status colour + glyph + word for a run lifecycle/terminal state.
     pub fn status(&self, state: &str) -> (Color32, &'static str, &'static str) {
         match state {
-            "running" => (self.running, "●", "Running"),
-            "queued" => (self.queued, "○", "Queued"),
-            "succeeded" | "completed" => (self.success, "✔", "Done"),
-            "blocked" => (self.blocked, "◆", "Needs decision"),
-            "failed" => (self.failed, "✖", "Failed"),
-            "cancelled" => (self.cancelled, "■", "Cancelled"),
-            "interrupted" => (self.blocked, "◇", "Interrupted"),
-            "needs_you" => (self.needs_you, "?", "Needs your answer"),
-            "refused" => (self.failed, "⊘", "Refused"),
-            _ => (self.text3, "·", "Unknown"),
+            "running" => (self.running, icons::LOADER_CIRCLE, "Running"),
+            "queued" => (self.queued, icons::CIRCLE_DASHED, "Queued"),
+            "succeeded" | "completed" => (self.success, icons::CIRCLE_CHECK, "Done"),
+            "blocked" => (self.blocked, icons::TRIANGLE_ALERT, "Needs decision"),
+            "failed" => (self.failed, icons::CIRCLE_X, "Failed"),
+            "cancelled" => (self.cancelled, icons::SQUARE, "Cancelled"),
+            "interrupted" => (self.blocked, icons::CIRCLE_PAUSE, "Interrupted"),
+            "needs_you" => (self.needs_you, icons::MESSAGE_SQUARE, "Needs your answer"),
+            "refused" => (self.failed, icons::CIRCLE_X, "Refused"),
+            _ => (self.text3, icons::CIRCLE, "Unknown"),
         }
     }
 
@@ -166,6 +172,10 @@ impl Theme {
         v.panel_fill = Color32::TRANSPARENT;
         v.window_fill = self.overlay;
         v.extreme_bg_color = self.code;
+        // text fields sit on the raised surface, never egui's black well
+        v.text_edit_bg_color = Some(self.raised);
+        // a blinking caret repaints twice a second forever: idle must be 0 frames
+        v.text_cursor.blink = false;
         v.code_bg_color = self.code;
         v.faint_bg_color = self.raised_hi;
         v.override_text_color = Some(self.text);
@@ -178,7 +188,7 @@ impl Theme {
         v.popup_shadow.color = self.shadow;
         v.window_shadow.color = self.shadow;
         for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-            w.corner_radius = 10.into();
+            w.corner_radius = R_SM.into();
         }
         v.widgets.inactive.weak_bg_fill = self.raised_hi;
         v.widgets.inactive.bg_fill = self.raised_hi;
@@ -192,17 +202,18 @@ impl Theme {
         ctx.set_visuals(v);
 
         ctx.global_style_mut(|s| {
-            s.spacing.item_spacing = egui::vec2(2.0 * SP, 2.0 * SP);
-            s.spacing.button_padding = egui::vec2(3.0 * SP, 1.5 * SP);
-            s.spacing.interact_size.y = 28.0;
+            // tight defaults; layouts add explicit gaps from the 4 px scale
+            s.spacing.item_spacing = egui::vec2(2.0 * SP, SP);
+            s.spacing.button_padding = egui::vec2(2.0 * SP, SP);
+            s.spacing.interact_size.y = 24.0;
             s.spacing.scroll.floating = true;
             s.spacing.scroll.bar_width = 6.0;
             s.text_styles = [
-                (TextStyle::Small, FontId::proportional(T_SMALL - 1.0)),
+                (TextStyle::Small, FontId::proportional(T_CAPTION)),
                 (TextStyle::Body, FontId::proportional(T_BODY)),
-                (TextStyle::Button, FontId::proportional(T_SMALL + 1.0)),
+                (TextStyle::Button, FontId::proportional(T_CALLOUT)),
                 (TextStyle::Heading, FontId::new(T_TITLE, semibold())),
-                (TextStyle::Monospace, FontId::monospace(T_SMALL)),
+                (TextStyle::Monospace, FontId::monospace(T_SMALL - 0.5)),
             ]
             .into();
             // Motion: 150–200 ms ease-out on hover/expand/open (PLAN §4).
@@ -221,10 +232,15 @@ pub fn install_fonts(ctx: &egui::Context) {
     f.font_data.insert("inter".into(), Arc::new(FontData::from_static(include_bytes!("../../assets/fonts/Inter-Regular.ttf"))));
     f.font_data.insert("inter-sb".into(), Arc::new(FontData::from_static(include_bytes!("../../assets/fonts/Inter-SemiBold.ttf"))));
     f.font_data.insert("jbm".into(), Arc::new(FontData::from_static(include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf"))));
+    f.font_data.insert("icons".into(), Arc::new(FontData::from_static(include_bytes!("../../assets/fonts/Lucide-subset.ttf"))));
     f.families.entry(FontFamily::Proportional).or_default().insert(0, "inter".into());
+    // icons FIRST: Inter maps its own alternates into the private-use range, so
+    // after Inter it would shadow the icons; the icon font has no Latin glyphs.
+    f.families.get_mut(&FontFamily::Proportional).expect("proportional family").insert(0, "icons".into());
     f.families.entry(FontFamily::Monospace).or_default().insert(0, "jbm".into());
     // Fallbacks (egui's default fonts carry emoji + symbols) stay after ours.
-    let mut sb = vec!["inter-sb".to_string(), "inter".to_string()];
+    // semibold: icons, Inter SemiBold, then the regular chain (Inter + fallbacks)
+    let mut sb = vec!["icons".to_string(), "inter-sb".to_string()];
     sb.extend(f.families[&FontFamily::Proportional].iter().skip(1).cloned());
     f.families.insert(semibold(), sb);
     ctx.set_fonts(f);
@@ -319,7 +335,7 @@ mod tests {
         install_fonts(&ctx);
         let _ = ctx.run_ui(Default::default(), |_| {});
         let missing: Vec<char> =
-            crate::ui::GLYPHS.chars().filter(|c| !ctx.fonts_mut(|f| f.has_glyph(&FontId::proportional(T_SMALL), *c))).collect();
+            crate::ui::GLYPHS.chars().chain(crate::ui::icons::ALL.iter().flat_map(|s| s.chars())).filter(|c| !ctx.fonts_mut(|f| f.has_glyph(&FontId::proportional(T_SMALL), *c))).collect();
         assert!(missing.is_empty(), "missing glyphs: {missing:?}");
     }
 
@@ -343,7 +359,12 @@ mod tests {
             {
                 assert!(ratio(t.text, bg) >= 4.5, "{} text on {name}: {:.2}", if t.dark { "dark" } else { "light" }, ratio(t.text, bg));
             }
-            assert!(ratio(t.text2, t.raised) >= 4.5, "secondary text");
+            // secondary text carries receipts, hints and meta lines: AA on every card surface
+            for (name, bg) in [("raised", t.raised), ("raised_hi", t.raised_hi), ("code", t.code)] {
+                assert!(ratio(t.text2, bg) >= 4.5, "secondary text on {name}: {:.2}", ratio(t.text2, bg));
+            }
+            // tertiary is for timestamps and truncation notes only: AA-large
+            assert!(ratio(t.text3, t.raised_hi) >= 3.0, "tertiary text");
             assert!(ratio(t.on_accent, t.accent_solid) >= 4.5, "send button");
         }
     }

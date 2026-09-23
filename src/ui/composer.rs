@@ -1,129 +1,100 @@
-//! Floating composer (Liquid Glass chrome, solid contents — no glass-on-glass):
-//! a controls row (mode · project · harness · model · effort) over a growing
-//! input with Send, which swaps to Stop while the thread's head turn runs.
-//! Enter sends, Shift+Enter inserts a newline.
+//! Floating composer (Liquid Glass chrome, solid contents: no glass-on-glass).
+//! One controls row (DESIGN_SYSTEM §5 "Chat composer"): intent · project ·
+//! harness+account · access, then attach · capture · ⋯ options on the right;
+//! a growing input (capped at 6 lines, scrolls inside) with Send / Stop.
+//! Enter sends; Shift/Alt+Enter is a newline; Ctrl+Enter sends, or stops a
+//! running turn (plain Enter never stops one).
 
 use super::glass::Kind;
-use super::theme::{R_LG, R_SM, SP, T_BODY, T_SMALL};
-use super::{View, basename, dim, last_rect, store_rect};
+use super::theme::{R_LG, R_SM, SP, T_BODY, T_CAPTION, T_SMALL};
+use super::{View, basename, caption, chip_menu, dim, ic, icon_button, icons, last_rect, row, segmented, store_rect, toggle_switch};
 use crate::model::{Strategy, TurnOpts};
 use crate::state::{MODES, State};
-use egui::{Align, Frame, Id, Key, Layout, Margin, Modifiers, Rect, RichText, Stroke, TextEdit, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, Event, Frame, Id, Key, Layout, Margin, Modifiers, Rect, RichText, Stroke, TextEdit, Ui, UiBuilder, pos2, vec2};
+
+const INPUT: &str = "composer-input";
 
 /// Draw the composer anchored to the bottom of `area`; returns its height.
 pub fn show(ui: &mut Ui, v: &mut View, s: &mut State, area: Rect) -> f32 {
-    let t = v.t;
     let w = (area.width() - 8.0 * SP).min(super::theme::MEASURE + 40.0);
     let id = Id::new("composer");
-    let h = last_rect(ui, id).map_or(118.0, |r| r.height());
+    let h = last_rect(ui, id).map_or(104.0, |r| r.height());
     let rect = Rect::from_min_size(pos2(area.center().x - w / 2.0, area.max.y - h - 4.0 * SP), vec2(w, h));
     v.glass.surface(ui, rect, R_LG, Kind::Chrome);
 
     let mut out = rect;
     ui.scope_builder(UiBuilder::new().max_rect(Rect::from_min_size(rect.min, vec2(w, 400.0))), |ui| {
-        let r = Frame::new().inner_margin(Margin::symmetric(16, 12)).show(ui, |ui| {
-            ui.set_width(w - 32.0);
-            controls(ui, v, s, w - 32.0);
-            ui.add_space(2.0 * SP);
-            input(ui, v, s, w - 32.0);
+        let r = Frame::new().inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
+            ui.set_width(w - 28.0);
+            ui.spacing_mut().item_spacing.y = 2.0 * SP;
+            controls(ui, v, s, w - 28.0);
+            attachments_row(ui, v, s);
+            input(ui, v, s, w - 28.0);
+            nesting_hint(ui, v, s);
         });
         out = r.response.rect;
     });
     store_rect(ui, id, out);
-    let _ = t;
+    // buttons don't keep focus (Mac): after a chip or Send click, typing goes
+    // back to the message field, unless another field or a menu has it.
+    if ui.memory(|m| m.focused().is_none()) && !egui::Popup::is_any_open(ui.ctx()) && s.client.is_some() {
+        ui.memory_mut(|m| m.request_focus(Id::new(INPUT)));
+    }
     out.height()
 }
 
-/// One control of the composer's controls row, with its laid-out width.
-type Control = (f32, fn(&mut Ui, &View, &mut State));
-
-/// Flow the controls into rows by their known widths. egui grows a parent past
-/// its max rect when a row overflows (which pushed Send off the glass), so we
-/// never let a row overflow instead of relying on wrapping.
-fn controls(ui: &mut Ui, v: &View, s: &mut State, inner_w: f32) {
-    let gap = 2.0 * SP;
-    let mut items: Vec<Control> =
-        vec![(176.0, mode_segment), (if s.selected.is_none() { 164.0 } else { 120.0 }, project_chip), (124.0, harness_pick)];
-    if let Some(h) = s.composer.harness.clone() {
-        s.load_models(&h);
-        let has_accounts = s.profiles.as_ref().is_some_and(|p| p.profiles.iter().any(|r| r.profile.harness_id == h && r.profile.enabled));
-        if has_accounts {
-            items.push((134.0, account_pin));
-        }
-        items.push((144.0, model_pick));
-        if s.harnesses.iter().any(|x| x.id == h && !x.effort_levels(s.composer.model.as_deref()).is_empty()) {
-            items.push((114.0, effort_pick));
-        }
-    }
+/// The controls row, wrapped only when it can't fit (chips never wrap inside).
+fn controls(ui: &mut Ui, v: &View, s: &mut State, _inner_w: f32) {
     if let Some(root) = s.effective_root() {
         s.load_trust(&root);
-    }
-    items.push((104.0, options_pick));
-    let mut rows: Vec<Vec<Control>> = vec![vec![]];
-    let mut used = 0.0;
-    for it in items {
-        if used > 0.0 && used + gap + it.0 > inner_w {
-            rows.push(vec![]);
-            used = 0.0;
-        }
-        used += if used > 0.0 { gap } else { 0.0 } + it.0;
-        rows.last_mut().expect("at least one row").push(it);
-    }
-    for (i, row) in rows.into_iter().enumerate() {
-        if i > 0 {
-            ui.add_space(SP);
-        }
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            for (_, draw) in row {
-                draw(ui, v, s);
-            }
-        });
     }
     if s.effective_root().is_none() && s.composer.mode != 0 {
         s.composer.mode = 0;
     }
+    // chips wrap in the width left of a fixed icon slot, so nothing overlaps
+    let icons_w = 3.0 * 26.0 + 8.0;
+    ui.horizontal(|ui| {
+        let left_w = (ui.available_width() - icons_w).max(120.0);
+        ui.allocate_ui_with_layout(vec2(left_w, 24.0), Layout::left_to_right(Align::Center).with_main_wrap(true), |ui| {
+            ui.spacing_mut().item_spacing = vec2(2.0 * SP, SP);
+            mode_segment(ui, v, s);
+            project_chip(ui, v, s);
+            route_chip(ui, v, s);
+            if s.current_mode() == "agent" && s.effective_root().is_some() {
+                access_chip(ui, v, s);
+            }
+        });
+        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            options_pick(ui, v, s);
+            let online = s.client.is_some() && !s.composer.picking;
+            ui.add_enabled_ui(online, |ui| {
+                if icon_button(ui, &v.t, icons::CAMERA, "Capture a screen region (grim + slurp)").clicked() {
+                    s.capture_region();
+                }
+                if icon_button(ui, &v.t, icons::PAPERCLIP, "Attach files").clicked() {
+                    s.pick_files();
+                }
+            });
+        });
+    });
 }
 
 /// Ask / Plan / Agent (Plan and Agent need a project).
 fn mode_segment(ui: &mut Ui, v: &View, s: &mut State) {
     let t = v.t;
     let has_project = s.effective_root().is_some();
-    Frame::new().fill(t.raised).corner_radius(R_SM).inner_margin(Margin::same(2)).stroke(Stroke::new(1.0_f32, t.separator)).show(
-        ui,
-        |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            for (i, m) in MODES.iter().enumerate() {
-                let label = match *m {
-                    "ask" => "Ask",
-                    "plan" => "Plan",
-                    _ => "Agent",
-                };
-                let on = s.composer.mode == i;
-                let enabled = has_project || *m == "ask";
-                let color = if on {
-                    t.on_accent
-                } else if enabled {
-                    t.text
-                } else {
-                    t.text3
-                };
-                let b = egui::Button::new(RichText::new(label).size(T_SMALL).color(color))
-                    .fill(if on { t.accent_solid } else { egui::Color32::TRANSPARENT })
-                    .corner_radius(R_SM - 3)
-                    .min_size(vec2(52.0, 24.0));
-                let resp = ui.add_enabled(enabled, b);
-                let resp = match *m {
-                    "ask" => resp.on_hover_text("Read-only answer"),
-                    "plan" => resp.on_hover_text("Read-only planning report with open questions"),
-                    _ => resp.on_hover_text("Writes code in the project"),
-                };
-                if resp.on_disabled_hover_text("Pick a project to use Plan and Agent").clicked() {
-                    s.composer.mode = i;
-                }
-            }
-        },
-    );
+    let mut mode = s.composer.mode;
+    ui.add_enabled_ui(true, |ui| {
+        let labels = [(0usize, "Ask"), (1, "Plan"), (2, "Agent")];
+        let allowed: Vec<(usize, &str)> = if has_project { labels.to_vec() } else { labels[..1].to_vec() };
+        if segmented(ui, &t, &mut mode, &allowed) {
+            s.composer.mode = mode;
+        }
+    })
+    .response
+    .on_hover_text(if has_project { "Ask: read-only answer · Plan: a report with open questions · Agent: writes code" } else { "Pick a project to use Plan and Agent" });
+    let _ = MODES;
 }
 
 /// The working directory: selectable for a draft thread, bound for an open one.
@@ -131,12 +102,12 @@ fn project_chip(ui: &mut Ui, v: &View, s: &mut State) {
     let t = v.t;
     if s.selected.is_none() {
         let label = s.composer.project.as_deref().map(basename).unwrap_or("No project").to_string();
-        drop_up(ui, "project", RichText::new(format!("📁 {label}")).size(T_SMALL), 140.0, true, |ui| {
+        chip_menu(ui, &t, "project", &format!("{} {label}", icons::FOLDER), t.text, true, |ui| {
             ui.selectable_value(&mut s.composer.project, None, "No project (Ask only)");
             for p in &s.projects {
                 ui.selectable_value(&mut s.composer.project, Some(p.root.clone()), &p.root);
             }
-            ui.separator();
+            ui.add_space(SP);
             let key = Id::new("project-path");
             let mut path: String = ui.ctx().data(|d| d.get_temp(key)).unwrap_or_default();
             let r = ui.add(TextEdit::singleline(&mut path).hint_text("/absolute/path/to/project").desired_width(260.0));
@@ -148,131 +119,187 @@ fn project_chip(ui: &mut Ui, v: &View, s: &mut State) {
             ui.ctx().data_mut(|d| d.insert_temp(key, path));
         });
     } else if let Some(root) = s.effective_root() {
-        ui.add(egui::Label::new(dim(&t, format!("📁 {}", basename(&root)))).truncate()).on_hover_text(root);
+        ui.add(egui::Label::new(RichText::new(format!("{} {}", icons::FOLDER, basename(&root))).size(T_SMALL).color(t.text2)).truncate()).on_hover_text(root);
     } else {
-        ui.label(dim(&t, "no project · Ask only"));
+        ui.label(dim(&t, "No project · Ask only"));
     }
 }
 
-fn harness_pick(ui: &mut Ui, v: &View, s: &mut State) {
+/// Harness and account in ONE capsule (Mac HarnessAccountChip): "claude · work".
+fn route_chip(ui: &mut Ui, v: &View, s: &mut State) {
     let t = v.t;
-    let hl = s.composer.harness.clone().unwrap_or_else(|| "Auto".into());
-    let before = s.composer.harness.clone();
-    drop_up(
-        ui,
-        "harness",
-        RichText::new(&hl).size(T_SMALL).color(s.composer.harness.as_deref().map_or(t.text, |h| t.harness(h))),
-        100.0,
-        false,
-        |ui| {
-            ui.selectable_value(&mut s.composer.harness, None, "Auto").on_hover_text("Let the engine route by quota and readiness");
-            for h in &s.harnesses {
-                let ok = h.status != "unavailable";
-                let text = RichText::new(h.label()).color(if ok { t.harness(&h.id) } else { t.text3 });
-                let resp = ui.add_enabled(ok, egui::Button::selectable(s.composer.harness.as_deref() == Some(&h.id), text));
-                let resp = if h.reasons.is_empty() { resp } else { resp.on_hover_text(h.reasons.join("\n")) };
-                if resp.on_disabled_hover_text(format!("{}: unavailable", h.id)).clicked() {
-                    s.composer.harness = Some(h.id.clone());
-                }
+    let h = s.composer.harness.clone();
+    let accounts: Vec<(String, String, bool)> = match (&h, &s.profiles) {
+        (Some(h), Some(p)) => p.profiles.iter().filter(|r| &r.profile.harness_id == h && r.profile.enabled).map(|r| (r.profile.profile_id.clone(), r.label(), r.ready())).collect(),
+        _ => vec![],
+    };
+    let account = s.composer.account.as_ref().and_then(|id| accounts.iter().find(|r| &r.0 == id)).map(|r| r.1.clone());
+    let label = match (&h, &account) {
+        (None, _) => "Auto".to_string(),
+        (Some(h), Some(a)) => format!("{h} · {a}"),
+        (Some(h), None) => h.clone(),
+    };
+    let color = h.as_deref().map_or(t.text, |x| t.harness(x));
+    let (before_h, before_a) = (s.composer.harness.clone(), s.composer.account.clone());
+    chip_menu(ui, &t, "route", &label, color, false, |ui| {
+        caption(ui, &t, "Harness");
+        ui.selectable_value(&mut s.composer.harness, None, "Auto").on_hover_text("Let the engine route by quota and readiness");
+        for x in &s.harnesses {
+            let ok = x.status != "unavailable";
+            let text = RichText::new(x.label()).color(if ok { t.harness(&x.id) } else { t.text3 });
+            let resp = ui.add_enabled(ok, egui::Button::selectable(s.composer.harness.as_deref() == Some(&x.id), text));
+            let resp = if x.reasons.is_empty() { resp } else { resp.on_hover_text(x.reasons.join("\n")) };
+            if resp.on_disabled_hover_text(format!("{}: unavailable", x.id)).clicked() {
+                s.composer.harness = Some(x.id.clone());
             }
-        },
-    );
-    if s.composer.harness != before {
+        }
+        if !accounts.is_empty() {
+            caption(ui, &t, "Account");
+            ui.selectable_value(&mut s.composer.account, None, "Automatic").on_hover_text("Route through the quota-aware pool of enabled accounts");
+            for (id, label, ready) in &accounts {
+                let text = if *ready { RichText::new(label) } else { RichText::new(format!("{label} · not ready")).color(t.text3) };
+                ui.selectable_value(&mut s.composer.account, Some(id.clone()), text);
+            }
+        }
+    });
+    if s.composer.harness != before_h {
         s.composer.model = None;
         s.composer.effort = None;
         s.composer.account = None;
         s.patch_thread(serde_json::json!({ "primaryHarness": s.composer.harness, "credentialProfileId": null }));
+    } else if s.composer.account != before_a {
+        s.patch_thread(serde_json::json!({ "primaryHarness": s.composer.harness, "credentialProfileId": s.composer.account }));
+    }
+    if let Some(h) = &h {
+        s.load_models(h);
     }
 }
 
-/// Model for the explicit harness — only its truth-source list, no free text.
-fn model_pick(ui: &mut Ui, v: &View, s: &mut State) {
+/// Access, visible on the row for Agent turns (amber when Full).
+fn access_chip(ui: &mut Ui, v: &View, s: &mut State) {
     let t = v.t;
-    let Some(h) = s.composer.harness.clone() else { return };
-    let models = s.models.get(&h).cloned();
-    let ml = s.composer.model.clone().unwrap_or_else(|| "Default model".into());
-    drop_up(ui, ("model", &h), RichText::new(&ml).size(T_SMALL), 120.0, false, |ui| {
-        ui.selectable_value(&mut s.composer.model, None, "Default model");
-        match &models {
-            Some(Ok(list)) if !list.models.is_empty() => {
-                for m in &list.models {
-                    ui.selectable_value(&mut s.composer.model, Some(m.id.clone()), m.label.as_deref().unwrap_or(&m.id));
-                }
+    let access = s.effective_access();
+    let label = match access {
+        "readonly" => "Read-only",
+        "full" => "Full access",
+        _ => "Workspace write",
+    };
+    let color = if access == "full" { t.blocked } else { t.text };
+    let root = s.effective_root().unwrap_or_default();
+    let trust = s.repo_trust().cloned();
+    let default_label = match trust.as_ref().map(|t| t.access_default.as_str()) {
+        Some("readonly") => "Repo default (read-only)",
+        Some("full") => "Repo default (full)",
+        _ => "Repo default (workspace write)",
+    };
+    let before = s.composer.opts.access;
+    chip_menu(ui, &t, "access", &format!("{} {label}", icons::SHIELD), color, true, |ui| {
+        for (k, l) in [(None, default_label), (Some("readonly"), "Read-only"), (Some("workspace_write"), "Workspace write"), (Some("full"), "Full access")] {
+            ui.selectable_value(&mut s.composer.opts.access, k, l);
+        }
+        if s.composer.opts.access == Some("full") && !trust.as_ref().is_some_and(|t| t.allow_full_access) {
+            ui.add_space(SP);
+            ui.add(egui::Label::new(RichText::new("Full access runs unsandboxed. It needs a recorded grant for this repo.").size(T_SMALL).color(t.blocked)).wrap());
+            // two deliberate steps: one stray click must never grant it
+            let key = Id::new(("full-access-ack", &root));
+            let mut ack: bool = ui.ctx().data(|d| d.get_temp(key)).unwrap_or(false);
+            ui.horizontal(|ui| {
+                toggle_switch(ui, &t, &mut ack);
+                ui.add(egui::Label::new(RichText::new(format!("I want agents to run unsandboxed in {}", basename(&root))).size(T_SMALL)).wrap());
+            });
+            ui.ctx().data_mut(|d| d.insert_temp(key, ack));
+            if ui.add_enabled(ack, egui::Button::new(RichText::new("Grant full access").size(T_SMALL))).clicked() {
+                s.grant_full_access(&root);
+                ui.ctx().data_mut(|d| d.remove::<bool>(key));
             }
-            Some(Ok(_)) => {
-                ui.label(dim(&t, "Harness default only"));
-            }
-            Some(Err(e)) => {
-                ui.label(dim(&t, e));
-            }
-            None => {}
         }
     });
+    if s.composer.opts.access != before {
+        s.patch_thread(serde_json::json!({ "access": s.composer.opts.access }));
+    }
 }
 
-fn effort_pick(ui: &mut Ui, _v: &View, s: &mut State) {
-    let Some(h) = s.composer.harness.clone() else { return };
-    let levels = s.harnesses.iter().find(|x| x.id == h).map(|x| x.effort_levels(s.composer.model.as_deref())).unwrap_or_default();
-    let el = s.composer.effort.clone().unwrap_or_else(|| "Default effort".into());
-    drop_up(ui, ("effort", &h), RichText::new(&el).size(T_SMALL), 90.0, false, |ui| {
-        ui.selectable_value(&mut s.composer.effort, None, "Default effort");
-        for l in &levels {
-            ui.selectable_value(&mut s.composer.effort, Some(l.clone()), l);
-        }
-    });
-    if s.composer.effort.as_ref().is_some_and(|e| !levels.contains(e)) {
-        s.composer.effort = None;
-    }
+/// Take an Enter press with EXACTLY these modifiers (egui's `consume_key`
+/// ignores extra Shift/Alt, which made Shift+Enter send).
+fn take_enter(ui: &Ui, want: Modifiers) -> bool {
+    ui.input_mut(|i| {
+        let mut hit = false;
+        i.events.retain(|e| match e {
+            Event::Key { key: Key::Enter, pressed: true, modifiers, .. } if modifiers.matches_exact(want) => {
+                hit = true;
+                false
+            }
+            _ => true,
+        });
+        hit
+    })
 }
 
 fn input(ui: &mut Ui, v: &View, s: &mut State, inner_w: f32) {
     let t = v.t;
     let running = s.head_live_id();
-    attachments_row(ui, v, s);
     ui.horizontal(|ui| {
-        let edit_id = Id::new("composer-input");
+        let edit_id = Id::new(INPUT);
         let focused = ui.memory(|m| m.has_focus(edit_id));
-        // Enter sends; Shift+Enter falls through to the editor as a newline.
-        let send_key = focused && running.is_none() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
-        let btn_w = 84.0;
-        let lines = s.composer.text.lines().count().clamp(1, 6);
+        let (mut send_key, mut stop_key) = (false, false);
+        if focused {
+            if running.is_some() {
+                stop_key = take_enter(ui, Modifiers::COMMAND);
+                // plain Enter neither sends nor stops while a turn runs
+                let _ = take_enter(ui, Modifiers::NONE);
+            } else {
+                send_key = take_enter(ui, Modifiers::NONE) | take_enter(ui, Modifiers::COMMAND);
+            }
+        }
+        let btn_w = 76.0;
+        let line_h = ui.fonts_mut(|f| f.row_height(&egui::FontId::proportional(T_BODY)));
         Frame::new()
             .fill(t.raised)
-            .corner_radius(R_SM + 2)
+            .corner_radius(R_SM + 4)
             .inner_margin(Margin::symmetric(12, 8))
-            .stroke(Stroke::new(1.0_f32, if focused { t.accent.gamma_multiply(0.8) } else { t.separator }))
+            .stroke(Stroke::new(1.5_f32, if focused { t.accent.gamma_multiply(0.6) } else { t.separator }))
             .show(ui, |ui| {
                 let hint = if s.client.is_none() {
                     "Engine offline"
                 } else if s.selected.is_none() {
-                    "Message… (the first message starts a thread)"
+                    "Ask, plan or describe a change…"
                 } else {
-                    "Reply…"
+                    "Continue this conversation…"
                 };
-                ui.add(
-                    TextEdit::multiline(&mut s.composer.text)
-                        .id(edit_id)
-                        .hint_text(RichText::new(hint).color(t.text3))
-                        .desired_rows(lines)
-                        .desired_width(inner_w - btn_w - 2.0 * SP - 26.0)
-                        .frame(Frame::NONE)
-                        .font(egui::FontId::proportional(T_BODY)),
-                );
+                // grows to 6 lines, then scrolls inside instead of covering the chat
+                egui::ScrollArea::vertical()
+                    .id_salt("composer-scroll")
+                    .max_height(6.0 * line_h + 2.0)
+                    .min_scrolled_height(line_h) // egui's 64 px default made one line look like four
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                    ui.add(
+                        TextEdit::multiline(&mut s.composer.text)
+                            .id(edit_id)
+                            .hint_text(RichText::new(hint).color(t.text3))
+                            .desired_rows(1)
+                            .desired_width(inner_w - btn_w - 2.0 * SP - 26.0)
+                            .frame(Frame::NONE)
+                            .font(egui::FontId::proportional(T_BODY)),
+                    );
+                });
             });
         ui.with_layout(Layout::bottom_up(Align::Max), |ui| {
             if let Some(id) = &running {
-                let b = egui::Button::new(RichText::new("■ Stop").color(t.on_accent))
-                    .fill(t.failed)
-                    .corner_radius(R_SM)
+                let b = egui::Button::new(RichText::new(format!("{} Stop", icons::SQUARE)).size(T_SMALL).color(t.text))
+                    .fill(t.raised)
+                    .stroke(Stroke::new(1.0_f32, t.separator))
+                    .corner_radius(17)
                     .min_size(vec2(btn_w, 34.0));
-                if ui.add_enabled(s.client.is_some(), b).on_hover_text(format!("Cancel the running turn ({id})")).clicked() {
+                if ui.add_enabled(s.client.is_some(), b).on_hover_text(format!("Stop the running turn (Ctrl+Enter) · {id}")).clicked() || stop_key {
                     s.cancel_head();
                 }
             } else {
-                let label = if s.composer.sending { "Sending…" } else { "Send ↵" };
-                let b = egui::Button::new(RichText::new(label).color(t.on_accent))
-                    .fill(t.accent_solid)
-                    .corner_radius(R_SM)
+                let ready = s.can_send();
+                let label = if s.composer.sending { "Sending…" } else { "Send" };
+                let b = egui::Button::new(RichText::new(label).size(T_SMALL).color(t.on_accent))
+                    .fill(if ready { t.accent_solid } else { t.accent_solid.gamma_multiply(0.35) })
+                    .corner_radius(17)
                     .min_size(vec2(btn_w, 34.0));
                 let opt_err = s.options_error();
                 let why = if s.client.is_none() {
@@ -284,133 +311,155 @@ fn input(ui: &mut Ui, v: &View, s: &mut State, inner_w: f32) {
                 } else {
                     "Sending…"
                 };
-                if ui.add_enabled(s.can_send(), b).on_disabled_hover_text(why).clicked() || (send_key && s.can_send()) {
+                if ui.add_enabled(ready, b).on_hover_text("Send (Enter)").on_disabled_hover_text(why).clicked() || (send_key && ready) {
                     s.submit();
                 }
             }
         });
-        if send_key && !s.can_send() {
-            // keep focus; nothing to send
-        }
     });
-    if s.effective_root().is_none() {
-        ui.label(dim(&t, "Pick a project to use Plan and Agent."));
-    }
-    // overlapping registered roots keep separate thread/artifact/trust identities (informational)
+}
+
+/// Overlapping registered roots keep separate thread/artifact/trust identities.
+fn nesting_hint(ui: &mut Ui, v: &View, s: &State) {
+    let t = v.t;
     if let Some(p) = s.effective_root().and_then(|r| s.projects.iter().find(|p| p.root == r)) {
         for n in &p.nesting {
             let verb = if n.relation == "inside" { "Nested inside" } else { "Contains" };
-            ui.label(dim(&t, format!("{verb} {}", basename(&n.root))))
+            ui.label(RichText::new(format!("{verb} {}", basename(&n.root))).size(T_CAPTION).color(t.text2))
                 .on_hover_text(format!("{verb} the registered project at {}. Overlapping roots have separate thread, artifact and trust identities.", n.root));
         }
     }
 }
 
-/// "Options": every per-turn knob the current mode takes, with a badge counting
-/// the ones changed from the defaults. The list stays open while editing.
+/// "⋯" Options: every per-turn knob the current mode takes, as label-column
+/// rows. An accent badge counts the knobs changed from the defaults; it turns
+/// red while an option blocks Send.
 fn options_pick(ui: &mut Ui, v: &View, s: &mut State) {
     let t = v.t;
     let mode = if s.effective_root().is_none() { "ask" } else { s.current_mode() };
     let draft_isolated = s.selected.is_none() && s.composer.isolated;
-    let n = s.composer.opts.changed(mode) + usize::from(draft_isolated);
+    let n = s.composer.opts.changed(mode) + usize::from(draft_isolated) + usize::from(s.composer.model.is_some()) + usize::from(s.composer.effort.is_some());
     let bad = s.options_error().is_some();
-    let label = if n == 0 { "Options".to_string() } else { format!("Options · {n}") };
-    let color = if bad { t.failed } else if n > 0 { t.accent } else { t.text };
-    drop_up(ui, "options", RichText::new(label).size(T_SMALL).color(color), 84.0, true, |ui| {
-        ui.set_width(300.0);
-        ui.spacing_mut().item_spacing.y = SP;
-        match mode {
-            "agent" => agent_options(ui, v, s),
-            "plan" => {
-                let o = &mut s.composer.opts;
-                ui.checkbox(&mut o.council, "Council: several harnesses draft, the primary merges");
-                if o.council {
-                    ui.add(egui::DragValue::new(&mut o.members).range(2..=4).prefix("Members: "));
+    let resp = icon_button(ui, &t, icons::ELLIPSIS, "Options");
+    if n > 0 || bad {
+        let c = resp.rect.right_top() + vec2(-5.0, 5.0);
+        ui.painter().circle_filled(c, 6.0, if bad { t.failed } else { t.accent_solid });
+        ui.painter().text(c, egui::Align2::CENTER_CENTER, if bad { "!".to_string() } else { n.to_string() }, egui::FontId::proportional(9.0), t.on_accent);
+    }
+    egui::Popup::menu(&resp)
+        .id(Id::new("options-popup"))
+        .align(egui::RectAlign::TOP_END)
+        .align_alternatives(&[egui::RectAlign::TOP_END, egui::RectAlign::TOP_START])
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_width(380.0);
+            let max_h = (resp.rect.top() - 24.0).clamp(320.0, 560.0);
+            egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = SP;
+                model_rows(ui, v, s);
+                match mode {
+                    "agent" => agent_options(ui, v, s),
+                    "plan" => {
+                        caption(ui, &t, "Plan strategy");
+                        let o = &mut s.composer.opts;
+                        row(ui, &t, "Council", |ui| toggle_switch(ui, &t, &mut o.council))
+                            .on_hover_text("Several harnesses draft in parallel; the primary merges");
+                        if o.council {
+                            row(ui, &t, "Members", |ui| stepper(ui, &t, &mut o.members, 2, 4));
+                        }
+                    }
+                    _ => {
+                        caption(ui, &t, "Ask");
+                        row(ui, &t, "Deep scan", |ui| toggle_switch(ui, &t, &mut s.composer.opts.deep_scan)).on_hover_text("Read the whole project first");
+                    }
                 }
-            }
-            _ => {
-                ui.checkbox(&mut s.composer.opts.deep_scan, "Deep scan: read the whole project first");
-            }
-        }
-        heading(ui, v, "Web");
-        choice(ui, &mut s.composer.opts.web, &[(None, "Default"), (Some("off"), "Off"), (Some("auto"), "Auto"), (Some("cached"), "Cached"), (Some("live"), "Live")]);
-        heading(ui, v, "Auth route");
-        choice(ui, &mut s.composer.opts.auth, &[(None, "Default"), (Some("auto"), "Auto"), (Some("subscription"), "Subscription"), (Some("api_key"), "API key")]);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Budget $").size(T_SMALL));
-            ui.add(TextEdit::singleline(&mut s.composer.opts.budget).hint_text("settings default").desired_width(110.0));
+                caption(ui, &t, "Routing");
+                row(ui, &t, "Web", |ui| choice(ui, &t, &mut s.composer.opts.web, &[(None, "Default"), (Some("off"), "Off"), (Some("auto"), "Auto"), (Some("cached"), "Cached"), (Some("live"), "Live")]));
+                row(ui, &t, "Auth route", |ui| choice(ui, &t, &mut s.composer.opts.auth, &[(None, "Default"), (Some("auto"), "Auto"), (Some("subscription"), "Subscription"), (Some("api_key"), "API key")]));
+                row(ui, &t, "Budget", |ui| {
+                    ui.label(RichText::new("$").size(T_SMALL).color(t.text2));
+                    ui.add(TextEdit::singleline(&mut s.composer.opts.budget).hint_text("settings default").desired_width(110.0));
+                });
+                if s.selected.is_none() && s.composer.project.is_some() {
+                    caption(ui, &t, "Workspace");
+                    row(ui, &t, "Isolated", |ui| toggle_switch(ui, &t, &mut s.composer.isolated)).on_hover_text("An own git worktree for this thread; Apply thread merges it");
+                }
+                if let Some(e) = s.options_error() {
+                    ui.add(egui::Label::new(RichText::new(e).size(T_SMALL).color(t.failed)).wrap());
+                }
+                if n > 0 && ui.button(RichText::new("Reset to defaults").size(T_SMALL)).clicked() {
+                    s.composer.opts = TurnOpts::default();
+                    s.composer.isolated = false;
+                    s.composer.model = None;
+                    s.composer.effort = None;
+                }
+            });
         });
-        if s.selected.is_none() && s.composer.project.is_some() {
-            ui.checkbox(&mut s.composer.isolated, "Isolated workspace (own worktree for this thread)");
-        }
-        if let Some(e) = s.options_error() {
-            ui.label(RichText::new(e).size(T_SMALL).color(t.failed));
-        }
-        if n > 0 && ui.button(RichText::new("Reset to defaults").size(T_SMALL)).clicked() {
-            s.composer.opts = TurnOpts::default();
-            s.composer.isolated = false;
-        }
+}
+
+/// Model and effort for the chosen harness (its truth-source lists only).
+fn model_rows(ui: &mut Ui, v: &View, s: &mut State) {
+    let t = v.t;
+    let Some(h) = s.composer.harness.clone() else { return };
+    caption(ui, &t, "Model");
+    let models: Vec<(String, String)> = match s.models.get(&h) {
+        Some(Ok(l)) => l.models.iter().map(|m| (m.id.clone(), m.label.clone().unwrap_or_else(|| m.id.clone()))).collect(),
+        _ => vec![],
+    };
+    row(ui, &t, "Model", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut s.composer.model, None, RichText::new("Default").size(T_SMALL));
+            for (id, label) in &models {
+                ui.selectable_value(&mut s.composer.model, Some(id.clone()), RichText::new(label).size(T_SMALL));
+            }
+        });
     });
+    let levels = s.harnesses.iter().find(|x| x.id == h).map(|x| x.effort_levels(s.composer.model.as_deref())).unwrap_or_default();
+    if s.composer.effort.as_ref().is_some_and(|e| !levels.contains(e)) {
+        s.composer.effort = None;
+    }
+    if !levels.is_empty() {
+        row(ui, &t, "Effort", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(&mut s.composer.effort, None, RichText::new("Default").size(T_SMALL));
+                for l in &levels {
+                    ui.selectable_value(&mut s.composer.effort, Some(l.clone()), RichText::new(l).size(T_SMALL));
+                }
+            });
+        });
+    }
 }
 
 fn agent_options(ui: &mut Ui, v: &View, s: &mut State) {
     let t = v.t;
-    let root = s.effective_root().unwrap_or_default();
-    let trust = s.repo_trust().cloned();
-    let default_label = match trust.as_ref().map(|t| t.access_default.as_str()) {
-        Some("readonly") => "Repo default (read-only)",
-        Some("full") => "Repo default (full)",
-        _ => "Repo default (workspace write)",
-    };
-    heading(ui, v, "Access");
-    let before = s.composer.opts.access;
-    choice(ui, &mut s.composer.opts.access, &[(None, default_label), (Some("readonly"), "Read-only"), (Some("workspace_write"), "Workspace write"), (Some("full"), "Full")]);
-    if s.composer.opts.access != before {
-        s.patch_thread(serde_json::json!({ "access": s.composer.opts.access }));
-    }
-    if s.composer.opts.access == Some("full") && !trust.as_ref().is_some_and(|t| t.allow_full_access) {
-        ui.label(RichText::new("Full access runs unsandboxed. It needs a recorded grant for this repo.").size(T_SMALL).color(t.needs_you));
-        // Two deliberate steps: the grant button appears under the pointer when the
-        // layout shifts, so one stray click must never be enough to grant it.
-        let key = Id::new(("full-access-ack", &root));
-        let mut ack: bool = ui.ctx().data(|d| d.get_temp(key)).unwrap_or(false);
-        ui.checkbox(&mut ack, RichText::new(format!("I want agents to run unsandboxed in {}", basename(&root))).size(T_SMALL));
-        ui.ctx().data_mut(|d| d.insert_temp(key, ack));
-        if ui.add_enabled(ack, egui::Button::new(RichText::new("Grant full access").size(T_SMALL))).clicked() {
-            s.grant_full_access(&root);
-            ui.ctx().data_mut(|d| d.remove::<bool>(key));
-        }
-    }
     let access = s.effective_access();
-
-    heading(ui, v, "Strategy");
+    caption(ui, &t, "Agent strategy");
     let mut strategies = vec![(Strategy::Single, "Single"), (Strategy::BestOf, "Best-of"), (Strategy::UntilClean, "Until clean"), (Strategy::Create, "Create")];
     if access == "readonly" {
         strategies.retain(|x| x.0 != Strategy::UntilClean);
     }
-    let o = &mut s.composer.opts;
-    ui.horizontal_wrapped(|ui| {
-        for (k, label) in strategies {
-            ui.selectable_value(&mut o.strategy, k, RichText::new(label).size(T_SMALL));
-        }
-    });
-    let blurb = match o.strategy_for(access) {
+    let mut strat = s.composer.opts.strategy_for(access);
+    if segmented(ui, &t, &mut strat, &strategies) {
+        s.composer.opts.strategy = strat;
+    }
+    let blurb = match strat {
         Strategy::Single => "One candidate; review is optional.",
         Strategy::BestOf => "One candidate per pooled harness in isolated envelopes, cross-reviewed; the best wins.",
         Strategy::UntilClean => "One envelope repaired until gates and review are clean.",
         Strategy::Create => "Scaffold a new repo or component.",
     };
-    ui.label(dim(&t, blurb));
-    match o.strategy_for(access) {
+    ui.add(egui::Label::new(dim(&t, blurb)).wrap());
+    match strat {
         Strategy::Single if access != "readonly" => {
-            ui.add(egui::DragValue::new(&mut o.attempts).range(1..=8).prefix("Max attempts: "));
+            row(ui, &t, "Max attempts", |ui| stepper(ui, &t, &mut s.composer.opts.attempts, 1, 8));
         }
         Strategy::BestOf => {
-            ui.label(dim(&t, "Pool (none = the engine picks two):"));
+            ui.label(dim(&t, "Pool (none = the engine picks two)"));
             let ids: Vec<(String, bool)> = s.harnesses.iter().map(|h| (h.id.clone(), h.status != "unavailable")).collect();
             for (id, ok) in ids {
                 let mut on = s.composer.opts.pool.contains(&id);
-                if ui.add_enabled(ok, egui::Checkbox::new(&mut on, &id)).changed() {
+                let changed = ui.add_enabled_ui(ok, |ui| row(ui, &t, &id, |ui| toggle_switch(ui, &t, &mut on).changed())).inner;
+                if changed {
                     if on {
                         s.composer.opts.pool.push(id.clone());
                     } else {
@@ -437,33 +486,39 @@ fn agent_options(ui: &mut Ui, v: &View, s: &mut State) {
     if !can_delegate {
         o.delegate = false;
     }
-    ui.add_enabled(can_delegate, egui::Checkbox::new(&mut o.delegate, "Delegate: let the agent spawn bounded sub-runs"))
-        .on_disabled_hover_text("The chosen harness cannot receive the delegation belt");
+    ui.add_enabled_ui(can_delegate, |ui| row(ui, &t, "Delegate", |ui| toggle_switch(ui, &t, &mut o.delegate)))
+        .response
+        .on_hover_text(if can_delegate { "Let the agent spawn bounded sub-runs" } else { "The chosen harness cannot receive the delegation belt" });
     if can_browse {
-        ui.checkbox(&mut o.browser, "Browser: the agent drives a real window");
+        row(ui, &t, "Browser", |ui| toggle_switch(ui, &t, &mut o.browser)).on_hover_text("The agent drives a real browser window");
     } else {
         o.browser = false;
     }
 
-    heading(ui, v, "Review");
-    let promised = matches!(o.strategy_for(access), Strategy::BestOf | Strategy::UntilClean);
+    caption(ui, &t, "Review");
+    let promised = matches!(strat, Strategy::BestOf | Strategy::UntilClean);
     let mut on = promised || o.review || !o.panel.trim().is_empty();
-    if ui.add_enabled(!promised, egui::Checkbox::new(&mut on, "Review changes")).changed() {
+    let changed = ui.add_enabled_ui(!promised, |ui| row(ui, &t, "Review changes", |ui| toggle_switch(ui, &t, &mut on).changed())).inner;
+    if changed {
         o.review = on;
     }
-    ui.add(TextEdit::singleline(&mut o.panel).hint_text("reviewers: codex=gpt-5:high, claude").desired_width(280.0))
-        .on_hover_text("Explicit reviewer panel: harness[=model[:effort]], comma separated");
+    row(ui, &t, "Reviewers", |ui| {
+        ui.add(TextEdit::singleline(&mut o.panel).hint_text("codex=gpt-5:high, claude").desired_width(220.0))
+            .on_hover_text("Explicit reviewer panel: harness[=model[:effort]], comma separated")
+    });
     if o.strategy == Strategy::Create {
-        heading(ui, v, "Test command");
-        ui.add(TextEdit::singleline(&mut o.test_command).hint_text("e.g. npm test").desired_width(280.0))
-            .on_hover_text("A deterministic gate run after the candidate. Typed argv: quotes group words, no shell, pipes or variables.");
+        row(ui, &t, "Test command", |ui| {
+            ui.add(TextEdit::singleline(&mut o.test_command).hint_text("e.g. npm test").desired_width(220.0))
+                .on_hover_text("A deterministic gate run after the candidate. Typed argv: quotes group words; no shell, pipes or variables.")
+        });
     }
-    heading(ui, v, "Protected-path approvals");
-    ui.add(TextEdit::multiline(&mut o.approvals).hint_text("glob[:reason], one per line").desired_rows(1).desired_width(280.0))
-        .on_hover_text("Paths this turn may change although they are protected (auto-protected gate/test paths only)");
+    row(ui, &t, "Protected paths", |ui| {
+        ui.add(TextEdit::multiline(&mut o.approvals).hint_text("glob[:reason], one per line").desired_rows(1).desired_width(220.0))
+            .on_hover_text("Paths this turn may change although they are protected (auto-protected gate/test paths only)")
+    });
 }
 
-/// Model chips for one pooled harness (its truth-source list only).
+/// Model choices for one pooled harness (its truth-source list only).
 fn pool_model(ui: &mut Ui, v: &View, s: &mut State, harness: &str) {
     let Some(Ok(list)) = s.models.get(harness) else { return };
     let ids: Vec<(String, String)> = list.models.iter().map(|m| (m.id.clone(), m.label.clone().unwrap_or_else(|| m.id.clone()))).collect();
@@ -471,7 +526,7 @@ fn pool_model(ui: &mut Ui, v: &View, s: &mut State, harness: &str) {
         return;
     }
     ui.horizontal_wrapped(|ui| {
-        ui.add_space(20.0);
+        ui.add_space(128.0);
         let cur = s.composer.opts.models.get(harness).cloned();
         if ui.selectable_label(cur.is_none(), RichText::new("default").size(T_SMALL)).clicked() {
             s.composer.opts.models.remove(harness);
@@ -484,85 +539,37 @@ fn pool_model(ui: &mut Ui, v: &View, s: &mut State, harness: &str) {
     });
 }
 
-fn heading(ui: &mut Ui, v: &View, text: &str) {
-    ui.add_space(SP / 2.0);
-    ui.label(RichText::new(text).size(T_SMALL).strong().color(v.t.text2));
+/// A segmented choice over optional wire values.
+fn choice(ui: &mut Ui, t: &super::theme::Theme, value: &mut Option<&'static str>, options: &[(Option<&'static str>, &str)]) {
+    segmented(ui, t, value, options);
 }
 
-/// A wrapped row of mutually exclusive choices.
-fn choice(ui: &mut Ui, value: &mut Option<&'static str>, options: &[(Option<&'static str>, &str)]) {
-    ui.horizontal_wrapped(|ui| {
-        for (k, label) in options {
-            ui.selectable_value(value, *k, RichText::new(*label).size(T_SMALL));
+/// − n + stepper within bounds.
+fn stepper(ui: &mut Ui, t: &super::theme::Theme, value: &mut u32, lo: u32, hi: u32) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        if ui.add_enabled(*value > lo, egui::Button::new(RichText::new("−").size(T_SMALL)).min_size(vec2(24.0, 22.0))).clicked() {
+            *value -= 1;
+        }
+        ui.add_sized(vec2(28.0, 22.0), egui::Label::new(RichText::new(value.to_string()).size(T_SMALL).color(t.text)));
+        if ui.add_enabled(*value < hi, egui::Button::new(RichText::new("+").size(T_SMALL)).min_size(vec2(24.0, 22.0))).clicked() {
+            *value += 1;
         }
     });
 }
 
-/// Pin the turn to one account of the chosen harness ("Automatic" = the
-/// quota-aware pool). Only enabled accounts are offered; the engine refuses
-/// unknown/disabled ids rather than silently defaulting.
-fn account_pin(ui: &mut Ui, v: &View, s: &mut State) {
-    let t = v.t;
-    let Some(h) = s.composer.harness.clone() else { return };
-    let rows: Vec<(String, String, bool)> = s
-        .profiles
-        .as_ref()
-        .map(|p| {
-            p.profiles
-                .iter()
-                .filter(|r| r.profile.harness_id == h && r.profile.enabled)
-                .map(|r| (r.profile.profile_id.clone(), r.label(), r.ready()))
-                .collect()
-        })
-        .unwrap_or_default();
-    if rows.is_empty() {
-        return;
-    }
-    let cur = s
-        .composer
-        .account
-        .as_ref()
-        .and_then(|id| rows.iter().find(|r| &r.0 == id))
-        .map(|r| r.1.clone())
-        .unwrap_or_else(|| "Automatic".into());
-    let before = s.composer.account.clone();
-    drop_up(ui, ("account", &h), RichText::new(cur).size(T_SMALL), 110.0, false, |ui| {
-        ui.selectable_value(&mut s.composer.account, None, "Automatic")
-            .on_hover_text("Route through the quota-aware pool of enabled accounts");
-        for (id, label, ready) in &rows {
-            let text = if *ready { RichText::new(label) } else { RichText::new(format!("{label} · not ready")).color(t.text3) };
-            ui.selectable_value(&mut s.composer.account, Some(id.clone()), text);
-        }
-    });
-    if s.composer.account != before {
-        s.patch_thread(serde_json::json!({ "primaryHarness": h, "credentialProfileId": s.composer.account }));
-    }
-}
-
-/// Attach (file chooser) · Capture (screen region) · removable chips with
-/// upload state. Send stays blocked while any upload is in flight.
+/// Attachment chips with upload state; only shown when there is something to
+/// show. Send stays blocked while any upload is in flight.
 fn attachments_row(ui: &mut Ui, v: &View, s: &mut State) {
     let t = v.t;
+    if s.composer.attachments.is_empty() && !s.composer.picking {
+        return;
+    }
     let mut remove = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0 * SP;
-        let online = s.client.is_some() && !s.composer.picking;
-        if ui
-            .add_enabled(online, egui::Button::new(RichText::new("+ Attach").size(T_SMALL)).frame(false))
-            .on_hover_text("Attach files")
-            .clicked()
-        {
-            s.pick_files();
-        }
-        if ui
-            .add_enabled(online, egui::Button::new(RichText::new("Capture").size(T_SMALL)).frame(false))
-            .on_hover_text("Capture a screen region (grim + slurp)")
-            .clicked()
-        {
-            s.capture_region();
-        }
         if s.composer.picking {
-            ui.spinner();
+            super::spinner(ui, 12.0, v.t.text2);
         }
         for a in &s.composer.attachments {
             let (c, note) = match &a.state {
@@ -570,48 +577,20 @@ fn attachments_row(ui: &mut Ui, v: &View, s: &mut State) {
                 crate::state::AttachState::Ready(_) => (t.text2, format!("{} KB", a.size.div_ceil(1024))),
                 crate::state::AttachState::Failed(e) => (t.failed, e.clone()),
             };
-            Frame::new()
-                .fill(t.raised)
-                .corner_radius(10)
-                .inner_margin(Margin::symmetric(8, 3))
-                .stroke(Stroke::new(1.0_f32, c.gamma_multiply(0.5)))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.label(RichText::new(&a.name).size(T_SMALL).color(t.text)).on_hover_text(&note);
-                        ui.label(RichText::new(&note).size(T_SMALL - 1.0).color(c));
-                        if ui
-                            .add(egui::Button::new(RichText::new("×").size(T_SMALL)).frame(false))
-                            .on_hover_text("Remove attachment")
-                            .clicked()
-                        {
-                            remove = Some(a.local);
-                        }
-                    });
+            Frame::new().fill(t.raised).corner_radius(R_SM).inner_margin(Margin::symmetric(8, 3)).stroke(Stroke::new(1.0_f32, c.gamma_multiply(0.5))).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(ic(icons::FILE, 12.0, t.text2));
+                    ui.label(RichText::new(&a.name).size(T_SMALL).color(t.text)).on_hover_text(&note);
+                    ui.label(RichText::new(&note).size(T_CAPTION).color(c));
+                    if icon_button(ui, &t, icons::X, "Remove attachment").clicked() {
+                        remove = Some(a.local);
+                    }
                 });
+            });
         }
     });
     if let Some(l) = remove {
         s.remove_attachment(l);
     }
-}
-
-/// A combo-style button whose list opens ABOVE it: the composer sits at the
-/// bottom of the window, where a ComboBox's downward list was clipped off-screen.
-/// `keep_open` keeps the list up while typing into a field inside it.
-fn drop_up(ui: &mut Ui, id_salt: impl std::hash::Hash, text: RichText, width: f32, keep_open: bool, add: impl FnOnce(&mut Ui)) {
-    let resp = ui.add(egui::Button::new(text).right_text(RichText::new("▲").size(7.0)).min_size(vec2(width, 24.0)));
-    let mut popup = egui::Popup::menu(&resp)
-        .id(ui.id().with(id_salt))
-        .align(egui::RectAlign::TOP_START)
-        .align_alternatives(&[egui::RectAlign::TOP_START, egui::RectAlign::TOP_END]);
-    if keep_open {
-        popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    }
-    popup.show(|ui| {
-        ui.set_min_width(width);
-        // the Options list carries a dozen knobs: let it use the room above the composer
-        let max_h = if keep_open { (resp.rect.top() - 24.0).clamp(320.0, 520.0) } else { 320.0 };
-        egui::ScrollArea::vertical().max_height(max_h).show(ui, add);
-    });
 }

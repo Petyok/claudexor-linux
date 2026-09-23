@@ -14,11 +14,11 @@ mod transcript;
 mod ui;
 
 use eframe::egui;
-use egui::{Align2, Color32, FontId, Id, Rect, RichText, Sense, Stroke, UiBuilder, pos2, vec2};
+use egui::{Color32, FontId, Id, Rect, RichText, Sense, Stroke, UiBuilder, pos2, vec2};
 use state::{Conn, State};
-use ui::glass::{Glass, Kind};
-use ui::theme::{self, R_SM, SIDEBAR_W, SP, T_SMALL, Theme};
-use ui::{View, last_rect, store_rect};
+use ui::glass::Glass;
+use ui::theme::{self, R_SM, SP, T_SMALL, Theme};
+use ui::{View, last_rect};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ThemePref {
@@ -30,6 +30,10 @@ enum ThemePref {
 struct Prefs {
     theme: ThemePref,
     reduce_transparency: bool,
+    /// Restored between launches (the compositor owns the position on Wayland).
+    window: Option<(f32, f32)>,
+    sidebar_w: f32,
+    last_project: Option<String>,
 }
 
 impl Prefs {
@@ -47,6 +51,12 @@ impl Prefs {
             },
             reduce_transparency: get("reduce_transparency").as_deref() == Some("1")
                 || std::env::var_os("CLAUDEXOR_REDUCE_TRANSPARENCY").is_some(),
+            window: get("window").and_then(|w| {
+                let (a, b) = w.split_once('x')?;
+                Some((a.parse::<f32>().ok()?.clamp(640.0, 4000.0), b.parse::<f32>().ok()?.clamp(480.0, 3000.0)))
+            }),
+            sidebar_w: get("sidebar").and_then(|w| w.parse::<f32>().ok()).unwrap_or(ui::theme::SIDEBAR_W).clamp(200.0, 420.0),
+            last_project: get("project").filter(|p| p.starts_with('/')),
         }
     }
     fn save(&self) {
@@ -57,11 +67,20 @@ impl Prefs {
             ThemePref::Light => "light",
             ThemePref::Dark => "dark",
         };
-        let _ = std::fs::write(p, format!("theme={theme}\nreduce_transparency={}\n", self.reduce_transparency as u8));
+        let mut out = format!("theme={theme}\nreduce_transparency={}\nsidebar={:.0}\n", self.reduce_transparency as u8, self.sidebar_w);
+        if let Some((w, h)) = self.window {
+            out.push_str(&format!("window={w:.0}x{h:.0}\n"));
+        }
+        if let Some(p) = &self.last_project {
+            out.push_str(&format!("project={p}\n"));
+        }
+        let _ = std::fs::write(p, out);
     }
 }
 
 struct App {
+    /// Desktop colour scheme from the portal: 0 unknown · 1 dark · 2 light.
+    desktop_dark: std::sync::Arc<std::sync::atomic::AtomicU8>,
     state: State,
     glass: Glass,
     md: egui_commonmark::CommonMarkCache,
@@ -104,8 +123,12 @@ impl App {
             }
             None => (None, None),
         };
-        let state = State::new(cc.egui_ctx.clone());
+        let mut state = State::new(cc.egui_ctx.clone());
+        state.composer.project = prefs.last_project.clone();
+        let desktop_dark = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(desktop_scheme()));
+        watch_desktop_scheme(desktop_dark.clone(), cc.egui_ctx.clone());
         App {
+            desktop_dark,
             state,
             glass: Glass { frost, refract, reduce_transparency: prefs.reduce_transparency, theme: theme::DARK },
             md: Default::default(),
@@ -126,7 +149,13 @@ impl App {
         let dark = match self.prefs.theme {
             ThemePref::Dark => true,
             ThemePref::Light => false,
-            ThemePref::System => ctx.system_theme().is_none_or(|t| t == egui::Theme::Dark),
+            // winit gives no desktop theme on X11 and only the app's own on
+            // Wayland: ask the desktop (portal / gsettings), then winit, then dark
+            ThemePref::System => match self.desktop_dark.load(std::sync::atomic::Ordering::Relaxed) {
+                1 => true,
+                2 => false,
+                _ => ctx.system_theme().is_none_or(|t| t == egui::Theme::Dark),
+            },
         };
         self.glass.reduce_transparency = self.prefs.reduce_transparency;
         if self.applied_dark != Some(dark) {
@@ -167,15 +196,26 @@ impl eframe::App for App {
                 }
             }
         }
+        // Widgets react to a click after they've been drawn, so the frame that
+        // handled input still shows the old state: paint one follow-up frame.
+        // (Idle stays at 0 frames: the follow-up has no input and stops there.)
+        if ctx.input(|i| !i.events.is_empty()) {
+            ctx.request_repaint();
+        }
         self.state.pump();
         // Desktop notifications only when the user is elsewhere (window unfocused).
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
         for n in self.state.notices.drain(..) {
             if !focused {
+                let ctx = ctx.clone();
                 std::thread::spawn(move || {
-                    let _ = std::process::Command::new("notify-send")
-                        .args(["--app-name=Claudexor", "--icon=claudexor-linux", &n.title, &n.body])
-                        .status();
+                    // --action waits for the click; "default" = the notification body
+                    let out = std::process::Command::new("notify-send")
+                        .args(["--app-name=Claudexor", "--icon=claudexor-linux", "--action=default=Open", &n.title, &n.body])
+                        .output();
+                    if out.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "default") {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
                 });
             }
         }
@@ -206,15 +246,42 @@ impl eframe::App for App {
         self.glass.backdrop(ui.painter(), full);
 
         let g = 3.0 * SP;
-        let side = Rect::from_min_size(full.min + vec2(g, g), vec2(SIDEBAR_W, full.height() - 2.0 * g));
+        let side = Rect::from_min_size(full.min + vec2(g, g), vec2(self.prefs.sidebar_w, full.height() - 2.0 * g));
+        // drag the sidebar's right edge to resize it (saved on exit)
+        let handle = Rect::from_min_max(pos2(side.max.x - 2.0, side.min.y + 40.0), pos2(side.max.x + 6.0, side.max.y - 40.0));
+        let drag = ui.interact(handle, Id::new("sidebar-resize"), Sense::drag()).on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        if drag.dragged() {
+            self.prefs.sidebar_w = (self.prefs.sidebar_w + drag.drag_delta().x).clamp(200.0, 420.0);
+        }
+        // remember the window size for the next launch
+        if let Some(r) = ctx.input(|i| i.viewport().inner_rect) {
+            self.prefs.window = Some((r.width(), r.height()));
+        }
         let main = Rect::from_min_max(pos2(side.max.x + g, full.min.y), full.max);
 
         let mut view = View { glass: &self.glass, md: &mut self.md, t };
 
+        // Ctrl+. toggles the workspace side panel (a trailing panel, never a tab)
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Period)) && self.state.selected.is_some() {
+            self.state.ws_open = !self.state.ws_open;
+        }
+        let ws = self.state.ws_open && self.state.detail.is_some();
+        let (conv, side_ws) = if ws {
+            let w = (main.width() * 0.42).clamp(340.0, 440.0);
+            (
+                Rect::from_min_max(main.min, pos2(main.max.x - w - g, main.max.y)),
+                Some(Rect::from_min_max(pos2(main.max.x - w - g, main.min.y + g + 44.0), pos2(main.max.x - g, main.max.y - g))),
+            )
+        } else {
+            (main, None)
+        };
         // Conversation first: the composer's glass then frosts/refracts it.
         let composer_h = last_rect(ui, Id::new("composer")).map_or(118.0, |r| r.height());
-        ui::thread::show(ui, &mut view, &mut self.state, &mut self.drafts, main, 64.0, composer_h + 8.0 * SP);
-        ui::composer::show(ui, &mut view, &mut self.state, main);
+        ui::thread::show(ui, &mut view, &mut self.state, &mut self.drafts, conv, 56.0, composer_h + 8.0 * SP);
+        ui::composer::show(ui, &mut view, &mut self.state, conv);
+        if let Some(r) = side_ws {
+            ui::thread::workspace_side(ui, &mut view, &mut self.state, &mut self.drafts, r);
+        }
         let side_out = ui::sidebar::show(ui, &mut view, &mut self.state, side);
         if side_out.toggle_accounts {
             self.accounts_open = !self.accounts_open;
@@ -225,106 +292,85 @@ impl eframe::App for App {
             }
         }
 
-        // status pill (top-right chrome) + settings menu
-        let pill_id = Id::new("pill");
-        let pill_w = last_rect(ui, pill_id).map_or(220.0, |r| r.width());
-        let pill = Rect::from_min_size(pos2(main.max.x - pill_w - 4.0 * SP, main.min.y + g), vec2(pill_w, 34.0));
-        self.glass.surface(ui, pill, 17, Kind::Chrome);
-        let (dot, word) = match &self.state.conn {
-            Conn::Online { engine } => (t.success, format!("Engine {engine}")),
-            Conn::Connecting => (t.queued, "Connecting…".into()),
-            Conn::Recovering => (t.blocked, "Recovering…".into()),
-            Conn::Offline(_) => (t.failed, "Offline".into()),
-            Conn::Incompatible(_) => (t.failed, "Incompatible".into()),
-        };
-        let pool = self
-            .state
-            .pools
-            .iter()
-            .find(|p| Some(&p.harness_id) == self.state.composer.harness.as_ref())
-            .or_else(|| self.state.pools.iter().find(|p| p.next_up.kind != "none"))
-            .or_else(|| self.state.pools.first());
-        let label = match pool {
-            Some(p) if matches!(self.state.conn, Conn::Online { .. }) => format!("{word}  ·  {} {}", p.harness_id, p.next_up.describe()),
-            _ => word,
-        };
-        let max_w = (main.width() * 0.5).max(160.0);
-        let p = ui.painter();
-        let mut job = egui::text::LayoutJob::simple_singleline(label, FontId::proportional(T_SMALL), t.text);
-        job.wrap = egui::text::TextWrapping::truncate_at_width(max_w - 58.0);
-        let galley = p.layout_job(job);
-        let want_w = galley.size().x + 58.0;
-        p.circle_filled(pos2(pill.min.x + 16.0, pill.center().y), 4.0, dot);
-        p.galley(pos2(pill.min.x + 28.0, pill.center().y - galley.size().y / 2.0), galley, t.text);
-        p.text(pos2(pill.max.x - 14.0, pill.center().y), Align2::RIGHT_CENTER, "⚙", FontId::proportional(T_SMALL + 1.0), t.text2);
-        store_rect(ui, pill_id, Rect::from_min_size(pill.min, vec2(want_w, 34.0)));
-        let pill_resp = ui.interact(pill, pill_id.with("click"), Sense::click());
-        let tip = match &self.state.conn {
-            Conn::Offline(why) | Conn::Incompatible(why) => why.clone(),
-            _ => match pool.and_then(|p| p.next_up.reason.clone()) {
-                Some(r) => format!("Engine status · settings\n\nnext up: {r}"),
-                None => "Engine status · settings".into(),
-            },
-        };
-        let pill_resp = pill_resp.on_hover_text(tip);
-        egui::Popup::menu(&pill_resp).show(|ui| {
-            ui.label(RichText::new("Appearance").size(T_SMALL).color(t.text3));
-            let mut changed = false;
-            for (p, name) in [(ThemePref::System, "System"), (ThemePref::Light, "Light"), (ThemePref::Dark, "Dark")] {
-                changed |= ui.radio_value(&mut self.prefs.theme, p, name).changed();
-            }
-            ui.separator();
-            changed |= ui.checkbox(&mut self.prefs.reduce_transparency, "Reduce transparency").changed();
-            if changed {
-                self.prefs.save();
-                self.applied_dark = None;
-            }
-            ui.separator();
-            if ui.button("Settings…").clicked() {
-                self.settings_open = true;
-                self.state.load_settings();
-                ui.close();
-            }
-            if ui.button("Accounts & quota").clicked() {
-                self.accounts_open = true;
-                self.accounts_opened_at = ctx.cumulative_frame_nr();
-                self.accounts_anchor = side_out.accounts_anchor.left_top() + vec2(0.0, -SP);
-                self.state.refresh_quota(false);
-            }
-            ui.label(RichText::new(format!("Claudexor for Linux {} · MIT", env!("CARGO_PKG_VERSION"))).size(T_SMALL).color(t.text3));
-            if let Some(v) = &self.state.engine_version {
-                ui.label(RichText::new(format!("engine {v} · protocol {}", api::PROTOCOL_MAJOR)).size(T_SMALL).color(t.text3));
-            }
-            ui.label(RichText::new("Ctrl+N new · Ctrl+K search · Alt+↑/↓ threads").size(T_SMALL).color(t.text3));
-            if !self.glass.blur_available() {
-                ui.label(RichText::new("glass: solid fallback").size(T_SMALL).color(t.text3));
-            }
+        // One minimal toolbar (DESIGN_SYSTEM §5): an icon cluster, no engine
+        // capsule. Connection state appears only when it isn't simply online.
+        let bar = Rect::from_min_size(pos2(main.max.x - 3.0 * 30.0 - 3.0 * SP, main.min.y + g), vec2(3.0 * 30.0, 30.0));
+        ui.scope_builder(UiBuilder::new().max_rect(bar), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if ui::icon_button(ui, &t, ui::icons::SETTINGS, "Settings").clicked() {
+                    self.settings_open = true;
+                    self.state.load_settings();
+                }
+                if self.state.selected.is_some() {
+                    let tip = if self.state.ws_open { "Hide the workspace (Ctrl+.)" } else { "Workspace: changes, outputs, evidence (Ctrl+.)" };
+                    if ui::icon_button(ui, &t, ui::icons::PANEL_RIGHT, tip).clicked() {
+                        self.state.ws_open = !self.state.ws_open;
+                    }
+                }
+                let (icon, next, tip) = match self.prefs.theme {
+                    ThemePref::System => (ui::icons::SUN_MOON, ThemePref::Light, "Appearance: system (click for light)"),
+                    ThemePref::Light => (ui::icons::SUN, ThemePref::Dark, "Appearance: light (click for dark)"),
+                    ThemePref::Dark => (ui::icons::MOON, ThemePref::System, "Appearance: dark (click for system)"),
+                };
+                if ui::icon_button(ui, &t, icon, tip).clicked() {
+                    self.prefs.theme = next;
+                    self.prefs.save();
+                    self.applied_dark = None;
+                }
+            });
         });
-
-        // error banner (dismissable, selectable)
-        if let Some(err) = self.state.error.clone() {
-            let w = (main.width() - 16.0 * SP).min(640.0);
-            let r = Rect::from_min_size(pos2(main.center().x - w / 2.0, main.min.y + g + 42.0), vec2(w, 40.0));
-            ui.painter().rect_filled(
-                r,
-                R_SM,
-                t.failed.gamma_multiply(if t.dark { 0.28 } else { 0.14 }).to_opaque().lerp_to_gamma(t.overlay, 0.35),
-            );
-            ui.painter().rect_stroke(r, R_SM, Stroke::new(1.0_f32, t.failed.gamma_multiply(0.6)), egui::StrokeKind::Inside);
-            ui.scope_builder(UiBuilder::new().max_rect(r.shrink2(vec2(12.0, 6.0))), |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.add(egui::Label::new(RichText::new(&err).color(t.text).size(T_SMALL)).truncate().selectable(true))
-                        .on_hover_text(&err);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new("×").frame(false)).on_hover_text("Dismiss").clicked() {
-                            self.state.error = None;
-                        }
-                        if ui.add(egui::Button::new("⎘").frame(false)).on_hover_text("Copy message").clicked() {
-                            ui.ctx().copy_text(err.clone());
-                        }
-                    });
+        let conn_line = match &self.state.conn {
+            Conn::Online { .. } => None,
+            Conn::Connecting => Some((t.queued, "Connecting to the engine…".to_string())),
+            Conn::Recovering => Some((t.blocked, "The engine is recovering its journal".to_string())),
+            Conn::Offline(why) => Some((t.failed, format!("Engine offline · {why}"))),
+            Conn::Incompatible(why) => Some((t.failed, format!("Incompatible engine · {why}"))),
+        };
+        if let Some((c, text)) = conn_line {
+            let w = (main.width() * 0.5).min(420.0);
+            let r = Rect::from_min_size(pos2(bar.min.x - w - 2.0 * SP, bar.min.y + 3.0), vec2(w, 24.0));
+            ui.scope_builder(UiBuilder::new().max_rect(r), |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(text).size(T_SMALL).color(t.text2)).truncate());
+                    let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 4.0, c);
                 });
             });
+        }
+
+        // error banner: wraps up to three lines, selectable, copy + dismiss
+        if let Some(err) = self.state.error.clone() {
+            let w = (main.width() - 16.0 * SP).min(640.0);
+            let top = main.min.y + g + 40.0;
+            let area = Rect::from_min_size(pos2(main.center().x - w / 2.0, top), vec2(w, 90.0));
+            let bid = Id::new("error-banner");
+            let h = ui.ctx().data(|d| d.get_temp::<f32>(bid)).unwrap_or(40.0);
+            let r = Rect::from_min_size(area.min, vec2(w, h));
+            ui.painter().rect_filled(r, R_SM, t.failed.gamma_multiply(if t.dark { 0.28 } else { 0.14 }).to_opaque().lerp_to_gamma(t.overlay, 0.35));
+            ui.painter().rect_stroke(r, R_SM, Stroke::new(1.0_f32, t.failed.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+            let used = ui
+                .scope_builder(UiBuilder::new().max_rect(area.shrink2(vec2(12.0, 8.0))), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(ui::icons::TRIANGLE_ALERT).size(14.0).color(t.failed));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            if ui::icon_button(ui, &t, ui::icons::X, "Dismiss").clicked() {
+                                self.state.error = None;
+                            }
+                            if ui::icon_button(ui, &t, ui::icons::COPY, "Copy message").clicked() {
+                                ui.ctx().copy_text(err.clone());
+                            }
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                                let mut job = egui::text::LayoutJob::single_section(err.clone(), egui::TextFormat::simple(FontId::proportional(T_SMALL), t.text));
+                                job.wrap = egui::text::TextWrapping { max_rows: 3, max_width: ui.available_width(), ..Default::default() };
+                                ui.add(egui::Label::new(job).selectable(true)).on_hover_text(&err);
+                            });
+                        });
+                    });
+                })
+                .response
+                .rect;
+            ui.ctx().data_mut(|d| d.insert_temp(bid, used.height() + 16.0));
         }
 
         // onboarding's "Set up an account" opens the accounts popover
@@ -340,7 +386,26 @@ impl eframe::App for App {
         }
         if self.settings_open {
             let mut view = View { glass: &self.glass, md: &mut self.md, t };
-            self.settings_open = ui::settings::show(&ctx, &mut view, &mut self.state, &mut self.settings_tab);
+            let mut look = ui::settings::Appearance {
+                theme: match self.prefs.theme {
+                    ThemePref::System => 0,
+                    ThemePref::Light => 1,
+                    ThemePref::Dark => 2,
+                },
+                reduce_transparency: self.prefs.reduce_transparency,
+            };
+            self.settings_open = ui::settings::show(&ctx, &mut view, &mut self.state, &mut self.settings_tab, &mut look);
+            let theme = match look.theme {
+                1 => ThemePref::Light,
+                2 => ThemePref::Dark,
+                _ => ThemePref::System,
+            };
+            if theme != self.prefs.theme || look.reduce_transparency != self.prefs.reduce_transparency {
+                self.prefs.theme = theme;
+                self.prefs.reduce_transparency = look.reduce_transparency;
+                self.prefs.save();
+                self.applied_dark = None;
+            }
         }
         if self.accounts_open {
             let mut view = View { glass: &self.glass, md: &mut self.md, t };
@@ -369,6 +434,8 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, gl: Option<&glow::Context>) {
+        self.prefs.last_project = self.state.composer.project.clone().or(self.prefs.last_project.clone());
+        self.prefs.save();
         if let Some(gl) = gl {
             if let Some(f) = &self.glass.frost {
                 f.destroy(gl);
@@ -544,7 +611,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("Claudexor")
             .with_app_id("claudexor-linux")
-            .with_inner_size([1180.0, 780.0])
+            .with_inner_size(Prefs::load().window.map_or([1180.0, 780.0], |(w, h)| [w, h]))
             .with_min_inner_size([760.0, 480.0])
             .with_transparent(true),
         renderer: eframe::Renderer::Glow,
@@ -595,4 +662,48 @@ mod scrub_tests {
         super::scrub_value(&mut v);
         assert_eq!(v, serde_json::json!({"a": [{"plan_label": "plan", "x": 1}], "plan_label": null}));
     }
+}
+
+/// The desktop's colour scheme via the XDG portal (1 dark, 2 light), falling
+/// back to GNOME's gsettings; 0 when neither says.
+fn desktop_scheme() -> u8 {
+    let run = |cmd: &str, args: &[&str]| {
+        std::process::Command::new(cmd)
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let portal = run(
+        "gdbus",
+        &[
+            "call", "--session", "--dest", "org.freedesktop.portal.Desktop", "--object-path", "/org/freedesktop/portal/desktop",
+            "--method", "org.freedesktop.portal.Settings.Read", "org.freedesktop.appearance", "color-scheme",
+        ],
+    );
+    match portal.as_deref().map(|o| o.contains("uint32 1")).zip(portal.as_deref().map(|o| o.contains("uint32 2"))) {
+        Some((true, _)) => return 1,
+        Some((_, true)) => return 2,
+        _ => {}
+    }
+    match run("gsettings", &["get", "org.gnome.desktop.interface", "color-scheme"]).as_deref().map(str::trim) {
+        Some("'prefer-dark'") => 1,
+        Some("'prefer-light'") => 2,
+        // 'default' means no preference: leave it to winit, then dark
+        _ => 0,
+    }
+}
+
+/// Follow desktop scheme switches: a cheap poll every 20 s on a thread
+/// (repaints only when it changes, so idle stays idle).
+fn watch_desktop_scheme(cell: std::sync::Arc<std::sync::atomic::AtomicU8>, ctx: egui::Context) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        let now = desktop_scheme();
+        if cell.swap(now, std::sync::atomic::Ordering::Relaxed) != now {
+            ctx.request_repaint();
+        }
+    });
 }

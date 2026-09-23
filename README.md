@@ -47,7 +47,7 @@ running (`CXL_NO_AUTOSTART=1` to opt out), and reconnects on its own.
   workspace.
 - **Accounts**: per-account readiness and quota windows, Enabled toggle, in-app
   **Log in** (open the link, paste the code back), Add account, Remove.
-- **Settings** (⚙ menu): routing goal, paid fallback, primary harness, auth
+- **Settings** (gear in the top-right toolbar): routing goal, paid fallback, primary harness, auth
   route, environment; per-run budget cap and question timeout; Harness Doctor
   with readiness checks, Recheck and per-harness default model / effort; API
   keys (write-only) and full-access grants with Revoke; engine concurrency.
@@ -63,7 +63,11 @@ running (`CXL_NO_AUTOSTART=1` to opt out), and reconnects on its own.
 - **Desktop notifications** (notify-send) when a turn finishes or needs you and the
   window is not focused.
 - **Glass**: compositor blur behind the window, frosted popovers, a refraction shader
-  on the chrome; light/dark/system themes and Reduce transparency (⚙ menu).
+  on the chrome; light/dark/system themes (System follows the desktop's
+  colour-scheme setting) and Reduce transparency (Settings → Appearance).
+- **Keyboard**: Enter sends, Shift+Enter is a new line, Ctrl+Enter sends or
+  stops a running turn, Ctrl+N new thread (keeps the draft), Ctrl+K search,
+  Alt+↑/↓ threads, Ctrl+. workspace panel.
 
 ## Tools
 
@@ -75,7 +79,7 @@ running (`CXL_NO_AUTOSTART=1` to opt out), and reconnects on its own.
 | `CXL_NO_FROST=1`, `CXL_NO_REFRACT=1` | switch off the L1 / L2 glass layers |
 | `CXL_REPAINT_DEBUG=1` | print why each frame was repainted (idle-cost debugging) |
 | `CXL_NO_AUTOSTART=1` | never start the daemon from the app |
-| `CLAUDEXOR_REDUCE_TRANSPARENCY=1` | start with solid surfaces (also a toggle in the ⚙ menu) |
+| `CLAUDEXOR_REDUCE_TRANSPARENCY=1` | start with solid surfaces (also a toggle in Settings → Appearance) |
 
 `cargo test` decodes the upstream wire fixtures and `tests/fixtures/live/`
 (recorded from a real daemon), and covers the SSE parser, reconnect resume
@@ -101,5 +105,10 @@ Reference measurements on a low-end integrated GPU (Intel HD 6000, Mesa 26.2),
 | idle CPU | 0% | 0.03% (1 tick / 30 s: SSE heartbeat) |
 | cold start → window | < 300 ms | 220 ms |
 | frame with glass (GPU) | < 4 ms | 1.6 ms avg, 1.9 ms max |
-| release binary | < 15 MB | 14.6 MB (with AccessKit and PNG/JPEG previews) |
+| release binary | < 15 MB | 14.6 MB (with AccessKit, PNG/JPEG previews and icons) |
 | idle RSS | < 80 MB | 94 MB VmRSS, of which 65 MB is Mesa's shared `libLLVM`/`libgallium`; app-private 22 MB, PSS 36 MB |
+
+## Credits
+
+Fonts are bundled: Inter and JetBrains Mono (SIL OFL), and a subset of the
+Lucide icons (ISC, `assets/fonts/LICENSE-Lucide.txt`).

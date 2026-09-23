@@ -2,11 +2,11 @@
 //! thread rows with a needs-you marker, and the accounts trigger at the bottom.
 
 use super::glass::Kind;
-use super::theme::{R_MD, R_SM, SP, T_BODY, T_SMALL, semibold};
-use super::{View, basename, dim};
+use super::theme::{R_MD, R_SM, SP, T_BODY, T_CAPTION, T_SMALL, semibold};
+use super::{View, basename, dim, icons};
 use crate::state::{Conn, State};
 use egui::{
-    Align, FontId, Id, Key, KeyboardShortcut, Layout, Modifiers, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, UiBuilder, pos2,
+    Align, FontId, Id, Key, KeyboardShortcut, Layout, Modifiers, Rect, RichText, ScrollArea, Sense, TextEdit, Ui, UiBuilder, pos2,
     vec2,
 };
 
@@ -20,23 +20,23 @@ pub fn show(ui: &mut Ui, v: &mut View, s: &mut State, rect: Rect) -> Out {
     v.glass.surface(ui, rect, R_MD, Kind::Card);
     let inner = rect.shrink(2.0 * SP);
 
-    // header (chrome)
-    let header = Rect::from_min_size(inner.min, vec2(inner.width(), 44.0));
-    v.glass.surface(ui, header, R_SM + 4, Kind::Chrome);
+    // header: title text straight on the panel (no glass stacked on glass)
+    let header = Rect::from_min_size(inner.min, vec2(inner.width(), 36.0));
     let mut new_clicked = false;
-    ui.scope_builder(UiBuilder::new().max_rect(header.shrink2(vec2(3.0 * SP, 0.0))), |ui| {
+    ui.scope_builder(UiBuilder::new().max_rect(header.shrink2(vec2(2.0 * SP, 0.0))), |ui| {
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-            ui.label(RichText::new("Claudexor").family(semibold()).size(T_BODY + 1.0).color(t.text));
+            ui.label(RichText::new("Threads").family(semibold()).size(T_BODY).color(t.text));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let b = egui::Button::new(RichText::new("+ New").color(t.on_accent).size(T_SMALL)).fill(t.accent_solid).corner_radius(10);
-                if ui
-                    .add_enabled(s.client.is_some(), b)
-                    .on_hover_text("New thread (Ctrl+N)")
-                    .on_disabled_hover_text("Engine offline")
-                    .clicked()
-                {
-                    new_clicked = true;
+                let trash_tip = if s.show_trash { "Back to threads" } else { "Trash" };
+                let trash_icon = if s.show_trash { icons::MESSAGE_SQUARE } else { icons::TRASH_2 };
+                if super::icon_button(ui, &t, trash_icon, trash_tip).clicked() {
+                    s.show_trash = !s.show_trash;
                 }
+                ui.add_enabled_ui(s.client.is_some(), |ui| {
+                    if super::icon_button(ui, &t, icons::PLUS, "New thread (Ctrl+N)").clicked() {
+                        new_clicked = true;
+                    }
+                });
             });
         });
     });
@@ -45,20 +45,21 @@ pub fn show(ui: &mut Ui, v: &mut View, s: &mut State, rect: Rect) -> Out {
     }
 
     // accounts trigger (bottom)
-    let foot = Rect::from_min_max(pos2(inner.min.x, inner.max.y - 40.0), inner.max);
-    let list = Rect::from_min_max(pos2(inner.min.x, header.max.y + 2.0 * SP), pos2(inner.max.x, foot.min.y - SP));
+    let foot = Rect::from_min_max(pos2(inner.min.x, inner.max.y - 36.0), inner.max);
+    let list = Rect::from_min_max(pos2(inner.min.x, header.max.y + SP), pos2(inner.max.x, foot.min.y - SP));
 
     ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
         let offline_copy = !s.threads_loaded && !s.threads.is_empty();
         if offline_copy {
-            ui.label(dim(&t, "Offline copy · read-only until the engine is back"));
+            let why = if matches!(s.conn, Conn::Offline(_)) { "Offline copy · read-only until the engine is back" } else { "Saved copy · refreshing…" };
+            ui.label(dim(&t, why));
         }
         if !s.threads_loaded && !offline_copy {
             ui.add_space(3.0 * SP);
             match &s.conn {
                 Conn::Online { .. } => {
                     ui.horizontal(|ui| {
-                        ui.spinner();
+                        super::spinner(ui, 14.0, egui::Color32::GRAY);
                         ui.label(dim(&t, "Loading threads…"));
                     });
                 }
@@ -92,14 +93,11 @@ pub fn show(ui: &mut Ui, v: &mut View, s: &mut State, rect: Rect) -> Out {
         let search_id = ui.id().with("thread-search");
         let mut query: String = ui.ctx().data(|d| d.get_temp(search_id)).unwrap_or_default();
         ui.horizontal(|ui| {
-            let trash_label = if s.show_trash { "← Threads" } else { "Trash" };
-            let w = ui.available_width() - 64.0;
-            let r = ui.add(TextEdit::singleline(&mut query).hint_text("Search threads  (Ctrl+K)").desired_width(w));
+            let w = ui.available_width();
+            let hint = if s.show_trash { "Search trash  (Ctrl+K)" } else { "Search  (Ctrl+K)" };
+            let r = ui.add(TextEdit::singleline(&mut query).hint_text(format!("{}  {hint}", icons::SEARCH)).desired_width(w));
             if ui.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::K))) {
                 r.request_focus();
-            }
-            if ui.add(egui::Button::new(RichText::new(trash_label).size(T_SMALL - 1.0)).frame(false)).clicked() {
-                s.show_trash = !s.show_trash;
             }
         });
         ui.ctx().data_mut(|d| d.insert_temp(search_id, query.clone()));
@@ -132,7 +130,7 @@ pub fn show(ui: &mut Ui, v: &mut View, s: &mut State, rect: Rect) -> Out {
         ScrollArea::vertical().id_salt("threads").auto_shrink([false; 2]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = SP;
             if s.selected.is_none() && !s.show_trash {
-                row(ui, v, "New thread", "draft", true, false, false);
+                row(ui, v, "New thread", "draft", true, false, false, false);
             }
             for &i in &visible {
                 let th = &s.threads[i];
@@ -146,7 +144,9 @@ pub fn show(ui: &mut Ui, v: &mut View, s: &mut State, rect: Rect) -> Out {
                 if closed {
                     sub = format!("archived · {sub}");
                 }
-                let resp = row(ui, v, th.display_title(), &sub, selected, th.needs_human, closed);
+                // running = its head run is live in a stream this window follows (Mac: liveTasks)
+                let running = th.head_run_id.as_ref().and_then(|r| s.runs.get(r)).is_some_and(|l| l.terminal.is_none() && l.streaming());
+                let resp = row(ui, v, th.display_title(), &sub, selected, th.needs_human, closed, running);
                 if resp.clicked() && !s.show_trash {
                     pick = Some(th.id.clone());
                 }
@@ -217,40 +217,46 @@ pub fn show(ui: &mut Ui, v: &mut View, s: &mut State, rect: Rect) -> Out {
     };
     painter.circle_filled(pos2(foot.min.x + 14.0, foot.center().y), 4.0, dot);
     painter.text(pos2(foot.min.x + 26.0, foot.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(T_SMALL), t.text2);
-    painter.text(pos2(foot.max.x - 10.0, foot.center().y), egui::Align2::RIGHT_CENTER, "⌃", FontId::proportional(T_SMALL), t.text3);
+    painter.text(pos2(foot.max.x - 10.0, foot.center().y), egui::Align2::RIGHT_CENTER, icons::CHEVRON_UP, FontId::proportional(13.0), t.text2);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Accounts & quota"));
     Out { toggle_accounts: resp.on_hover_text("Accounts & quota").clicked(), accounts_anchor: foot }
 }
 
-fn row(ui: &mut Ui, v: &View, title: &str, sub: &str, selected: bool, needs_you: bool, closed: bool) -> egui::Response {
+/// A thread row: a leading status column (spinner running · dot needs-you),
+/// title (semibold only when selected) and a one-line meta line.
+fn row(ui: &mut Ui, v: &View, title: &str, sub: &str, selected: bool, needs_you: bool, closed: bool, running: bool) -> egui::Response {
     let t = v.t;
     let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 48.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 42.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, title));
     let p = ui.painter();
     if selected {
-        p.rect_filled(rect, R_SM, t.accent_solid.gamma_multiply(if t.dark { 0.38 } else { 0.16 }));
-        p.rect_stroke(rect, R_SM, Stroke::new(1.0_f32, t.accent.gamma_multiply(0.45)), egui::StrokeKind::Inside);
+        p.rect_filled(rect, R_SM, t.accent_solid.gamma_multiply(if t.dark { 0.22 } else { 0.12 }));
     } else if resp.hovered() {
-        p.rect_filled(rect, R_SM, t.raised_hi.gamma_multiply(0.55));
+        p.rect_filled(rect, R_SM, t.text.gamma_multiply(0.05));
     }
-    let x = rect.min.x + 3.0 * SP;
-    let max_w = rect.width() - 6.0 * SP - if needs_you { 14.0 } else { 0.0 };
+    // leading status column (Mac ThreadRowStatus: running outranks needs-you)
+    let status = pos2(rect.min.x + 12.0, rect.min.y + 14.0);
+    if running {
+        p.text(status, egui::Align2::CENTER_CENTER, icons::LOADER_CIRCLE, FontId::proportional(11.0), t.running);
+    } else if needs_you {
+        p.circle_filled(status, 4.0, t.needs_you);
+    }
+    let x = rect.min.x + 24.0;
+    let max_w = rect.width() - 24.0 - 2.0 * SP;
     let title_col = if closed { t.text3 } else { t.text };
-    let tg = p.layout(title.to_string(), FontId::new(T_SMALL + 1.0, semibold()), title_col, max_w);
-    let tg = truncate_one_line(ui, tg, title, FontId::new(T_SMALL + 1.0, semibold()), title_col, max_w);
-    p.galley(pos2(x, rect.min.y + 7.0), tg, title_col);
-    let sg = truncate_one_line(
-        ui,
-        p.layout_no_wrap(sub.to_string(), FontId::proportional(T_SMALL - 1.0), t.text3),
-        sub,
-        FontId::proportional(T_SMALL - 1.0),
-        t.text3,
-        max_w,
-    );
-    p.galley(pos2(x, rect.min.y + 27.0), sg, t.text3);
-    if needs_you {
-        p.circle_filled(pos2(rect.max.x - 12.0, rect.center().y), 4.5, t.needs_you);
-    }
-    let resp = if needs_you { resp.on_hover_text("Needs you") } else { resp };
+    let font = if selected { FontId::new(T_SMALL + 1.0, semibold()) } else { FontId::proportional(T_SMALL + 1.0) };
+    let tg = truncate_one_line(ui, p.layout_no_wrap(title.to_string(), font.clone(), title_col), title, font, title_col, max_w);
+    p.galley(pos2(x, rect.min.y + 5.0), tg, title_col);
+    let sg = truncate_one_line(ui, p.layout_no_wrap(sub.to_string(), FontId::proportional(T_CAPTION), t.text2), sub, FontId::proportional(T_CAPTION), t.text2, max_w);
+    p.galley(pos2(x, rect.min.y + 24.0), sg, t.text2);
+    let resp = if running {
+        resp.on_hover_text("A turn is running in this thread")
+    } else if needs_you {
+        resp.on_hover_text("Needs you")
+    } else {
+        resp
+    };
     resp.on_hover_text(title)
 }
 

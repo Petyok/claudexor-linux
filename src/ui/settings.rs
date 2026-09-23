@@ -4,6 +4,7 @@
 //! Budget, Harnesses (Doctor + per-harness defaults), Keys & trust, Engine.
 
 use super::theme::{R_SM, SP, T_SMALL, T_TITLE, semibold};
+use super::icons;
 use super::{View, dim};
 use crate::model::{Settings, secret_slot};
 use crate::state::{Fetch, State};
@@ -17,69 +18,71 @@ pub enum Tab {
     Budget,
     Harnesses,
     Keys,
+    Appearance,
     Engine,
 }
 
+/// Client-only preferences the shell owns (theme 0 system · 1 light · 2 dark).
+pub struct Appearance {
+    pub theme: u8,
+    pub reduce_transparency: bool,
+}
+
 /// Draw the modal; returns false once the user closes it.
-pub fn show(ctx: &egui::Context, v: &mut View, s: &mut State, tab: &mut Tab) -> bool {
+pub fn show(ctx: &egui::Context, v: &mut View, s: &mut State, tab: &mut Tab, look: &mut Appearance) -> bool {
     let t = v.t;
     let mut open = true;
     let modal = egui::Modal::new(Id::new("settings")).show(ctx, |ui| {
-        ui.set_width(640.0_f32.min(ctx.content_rect().width() - 48.0));
+        ui.set_width(660.0_f32.min(ctx.content_rect().width() - 48.0));
+        ui.spacing_mut().item_spacing.y = 2.0 * SP;
         ui.horizontal(|ui| {
             ui.label(RichText::new("Settings").family(semibold()).size(T_TITLE).color(t.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
+                if ui.add(egui::Button::new(RichText::new("Done").color(t.on_accent)).fill(t.accent_solid).corner_radius(R_SM)).clicked() {
                     open = false;
                 }
             });
         });
-        ui.horizontal_wrapped(|ui| {
-            for (k, label) in [(Tab::Routing, "Routing"), (Tab::Budget, "Budget"), (Tab::Harnesses, "Harnesses"), (Tab::Keys, "Keys & trust"), (Tab::Engine, "Engine")] {
-                if ui.selectable_value(tab, k, label).changed() {
-                    // the modal resizes to the new tab: paint the settled layout too
-                    ui.ctx().request_repaint();
-                }
-            }
-        });
-        ui.separator();
+        let before = *tab;
+        super::segmented(
+            ui,
+            &t,
+            tab,
+            &[(Tab::Routing, "Routing"), (Tab::Budget, "Budget"), (Tab::Harnesses, "Harnesses"), (Tab::Keys, "Keys & trust"), (Tab::Appearance, "Appearance"), (Tab::Engine, "Engine")],
+        );
+        if *tab != before {
+            // the modal resizes to the new tab: paint the settled layout too
+            ui.ctx().request_repaint();
+        }
+        let body_h = (ctx.content_rect().height() - 220.0).max(240.0);
+        // client-only tabs work without the engine; the rest render once settings arrive
         let st = match &s.settings {
             Some(Fetch::Ready(st)) => Some(st.clone()),
-            Some(Fetch::Failed(e)) => {
-                ui.label(RichText::new(format!("Could not read settings: {e}")).color(t.failed));
-                None
-            }
-            _ if s.client.is_none() => {
-                ui.label(dim(&t, "The engine is offline; settings open once it is back."));
-                None
-            }
-            _ => {
-                ui.spinner();
-                None
-            }
+            _ => None,
         };
-        let Some(st) = st else { return };
-        // min_scrolled_height: a modal's area otherwise shrinks the body to its first-frame size
-        let body_h = (ctx.content_rect().height() - 220.0).max(240.0);
         ScrollArea::vertical().max_height(body_h).min_scrolled_height(body_h).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = SP * 1.5;
-            match tab {
-                Tab::Routing => routing(ui, v, s, &st),
-                Tab::Budget => budget(ui, v, s, &st),
-                Tab::Harnesses => harnesses(ui, v, s, &st),
-                Tab::Keys => keys(ui, v, s),
-                Tab::Engine => engine(ui, v, s, &st),
+            ui.spacing_mut().item_spacing.y = 2.0 * SP;
+            match (*tab, &st) {
+                (Tab::Appearance, _) => appearance(ui, v, look),
+                (Tab::Engine, _) => engine(ui, v, s, st.as_ref()),
+                (_, None) => loading(ui, v, s),
+                (Tab::Routing, Some(st)) => routing(ui, v, s, st),
+                (Tab::Budget, Some(st)) => budget(ui, v, s, st),
+                (Tab::Harnesses, Some(st)) => harnesses(ui, v, s, st),
+                (Tab::Keys, Some(_)) => keys(ui, v, s),
             }
         });
-        ui.separator();
+        // "Saved" fades after 2 s; errors stay until the next change
+        let fresh = s.settings_note_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2));
         match &s.settings_note {
-            Some(Ok(m)) => {
-                ui.label(RichText::new(format!("✔ {m}")).size(T_SMALL).color(t.success));
+            Some(Ok(m)) if fresh => {
+                ui.label(RichText::new(format!("{} {m}", icons::CHECK)).size(T_SMALL).color(t.success));
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
             }
             Some(Err(e)) => {
                 ui.add(egui::Label::new(RichText::new(e).size(T_SMALL).color(t.failed)).wrap().selectable(true));
             }
-            None => {
+            _ => {
                 ui.label(dim(&t, "Changes save as you make them."));
             }
         }
@@ -90,6 +93,36 @@ pub fn show(ctx: &egui::Context, v: &mut View, s: &mut State, tab: &mut Tab) -> 
     open
 }
 
+fn loading(ui: &mut Ui, v: &View, s: &State) {
+    let t = v.t;
+    match &s.settings {
+        Some(Fetch::Failed(e)) => {
+            ui.label(RichText::new(format!("Could not read settings: {e}")).color(t.failed));
+        }
+        _ if s.client.is_none() => {
+            ui.label(dim(&t, "The engine is offline; these settings open once it is back."));
+        }
+        _ => {
+            ui.horizontal(|ui| {
+                super::spinner(ui, 12.0, v.t.text2);
+                ui.label(dim(&t, "Reading settings…"));
+            });
+        }
+    }
+}
+
+fn appearance(ui: &mut Ui, v: &View, look: &mut Appearance) {
+    let t = v.t;
+    super::group(ui, &t, |ui| {
+        super::row(ui, &t, "Theme", |ui| super::segmented(ui, &t, &mut look.theme, &[(0u8, "System"), (1, "Light"), (2, "Dark")]));
+        super::row(ui, &t, "Reduce transparency", |ui| super::toggle_switch(ui, &t, &mut look.reduce_transparency))
+            .on_hover_text("Solid surfaces instead of glass");
+        if !v.glass.blur_available() {
+            ui.label(RichText::new("Frosted glass is unavailable on this GPU: panels use solid fallbacks.").size(T_SMALL).color(t.text2));
+        }
+    });
+}
+
 fn heading(ui: &mut Ui, v: &View, text: &str, help: &str) {
     ui.add_space(SP / 2.0);
     ui.label(RichText::new(text).strong().color(v.t.text));
@@ -98,15 +131,16 @@ fn heading(ui: &mut Ui, v: &View, text: &str, help: &str) {
     }
 }
 
-/// A row of mutually exclusive choices that saves `{key: value}` on change.
-fn choice(ui: &mut Ui, s: &mut State, key: &str, current: Option<&str>, options: &[(&str, &str)]) {
-    ui.horizontal_wrapped(|ui| {
-        for (value, label) in options {
-            if ui.selectable_label(current == Some(*value), *label).clicked() && current != Some(*value) {
-                s.save_settings(json!({ key: value }));
-            }
+/// A segmented choice that saves `{key: value}` on change.
+fn choice(ui: &mut Ui, v: &View, s: &mut State, key: &str, current: Option<&str>, options: &[(&str, &str)]) {
+    let t = v.t;
+    let opts: Vec<(Option<&str>, &str)> = options.iter().map(|(k, l)| (Some(*k), *l)).collect();
+    let mut cur = current;
+    if super::segmented(ui, &t, &mut cur, &opts) {
+        if let Some(value) = cur {
+            s.save_settings(json!({ key: value }));
         }
-    });
+    }
 }
 
 /// A text field with a draft kept across frames; `commit` runs on Enter / focus loss.
@@ -127,10 +161,11 @@ fn text_field(ui: &mut Ui, id: impl std::hash::Hash, stored: String, hint: &str,
 fn routing(ui: &mut Ui, v: &View, s: &mut State, st: &Settings) {
     let r = &st.routing;
     heading(ui, v, "Routing goal", "Auto paces expiring quota, Quality uses your highest comparable tier, Economy minimizes incremental paid spend.");
-    choice(ui, s, "routingGoal", r.goal.as_deref(), &[("auto", "Auto"), ("quality", "Quality"), ("economy", "Economy")]);
+    choice(ui, v, s, "routingGoal", r.goal.as_deref(), &[("auto", "Auto"), ("quality", "Quality"), ("economy", "Economy")]);
     heading(ui, v, "Paid fallback", "Whether a run may move to a paid route when subscriptions can't take it.");
     choice(
         ui,
+        v,
         s,
         "paidFallback",
         r.paid_fallback.as_deref(),
@@ -151,9 +186,9 @@ fn routing(ui: &mut Ui, v: &View, s: &mut State, st: &Settings) {
         }
     });
     heading(ui, v, "Auth route", "Subscription sessions first, API keys first, or let the engine choose.");
-    choice(ui, s, "authPreference", r.auth_preference.as_deref(), &[("auto", "Auto"), ("subscription", "Subscription"), ("api_key", "API key")]);
+    choice(ui, v, s, "authPreference", r.auth_preference.as_deref(), &[("auto", "Auto"), ("subscription", "Subscription"), ("api_key", "API key")]);
     heading(ui, v, "Environment", "Mirror your native shell environment into harness processes, or start them clean.");
-    choice(ui, s, "envInheritance", r.env_inheritance.as_deref(), &[("mirror_native", "Mirror native"), ("clean", "Clean")]);
+    choice(ui, v, s, "envInheritance", r.env_inheritance.as_deref(), &[("mirror_native", "Mirror native"), ("clean", "Clean")]);
 }
 
 fn budget(ui: &mut Ui, v: &View, s: &mut State, st: &Settings) {
@@ -162,7 +197,7 @@ fn budget(ui: &mut Ui, v: &View, s: &mut State, st: &Settings) {
     let unlimited = pb["kind"] != "finite";
     heading(ui, v, "Paid budget per run", "Unlimited still records exact or estimated spend; it removes only the cap. Zero admits only subscription or proven-free routes.");
     let mut u = unlimited;
-    if ui.checkbox(&mut u, "Unlimited").changed() {
+    if super::row(ui, &t, "Unlimited", |ui| super::toggle_switch(ui, &t, &mut u)).changed() {
         let patch = if u { json!({"kind": "unlimited"}) } else { json!({"kind": "finite", "maxUsd": 1.0}) };
         s.save_settings(json!({ "paidBudgetPerRun": patch }));
     }
@@ -173,7 +208,7 @@ fn budget(ui: &mut Ui, v: &View, s: &mut State, st: &Settings) {
             if let Some(text) = text_field(ui, "maxUsd", cur, "e.g. 2.50", 100.0, false) {
                 match text.trim().trim_start_matches('$').parse::<f64>() {
                     Ok(x) if x.is_finite() && x >= 0.0 => s.save_settings(json!({"paidBudgetPerRun": {"kind": "finite", "maxUsd": x}})),
-                    _ => s.settings_note = Some(Err(format!("“{text}” is not a dollar amount"))),
+                    _ => s.note_settings(Err(format!("“{text}” is not a dollar amount"))),
                 }
             }
         });
@@ -186,7 +221,7 @@ fn budget(ui: &mut Ui, v: &View, s: &mut State, st: &Settings) {
                 "" => s.save_settings(json!({ "interactionTimeoutMs": Value::Null })),
                 x => match x.parse::<u64>() {
                     Ok(m) if m > 0 => s.save_settings(json!({ "interactionTimeoutMs": m * 60_000 })),
-                    _ => s.settings_note = Some(Err(format!("“{x}” is not a number of minutes"))),
+                    _ => s.note_settings(Err(format!("“{x}” is not a number of minutes"))),
                 },
             }
         }
@@ -220,9 +255,9 @@ fn harnesses(ui: &mut Ui, v: &View, s: &mut State, st: &Settings) {
             });
             for r in &h.doctor_rows() {
                 let (g, c) = match r.status.as_str() {
-                    "pass" => ("✔", t.success),
-                    "fail" => ("✖", t.failed),
-                    _ => ("−", t.text3),
+                    "pass" => (icons::CIRCLE_CHECK, t.success),
+                    "fail" => (icons::CIRCLE_X, t.failed),
+                    _ => (icons::CIRCLE, t.text3),
                 };
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(g).size(T_SMALL).color(c));
@@ -245,7 +280,8 @@ fn harnesses(ui: &mut Ui, v: &View, s: &mut State, st: &Settings) {
             let hs = st.harnesses.get(&h.id).cloned().unwrap_or_default();
             ui.horizontal_wrapped(|ui| {
                 let mut en = hs.enabled.unwrap_or(true);
-                if ui.checkbox(&mut en, "Enabled").changed() {
+                ui.label(RichText::new("Enabled").size(T_SMALL).color(t.text2));
+                if super::toggle_switch(ui, &t, &mut en).changed() {
                     s.save_settings(json!({"harnesses": { h.id.clone(): {"enabled": en} }}));
                 }
                 s.load_models(&h.id);
@@ -338,31 +374,51 @@ fn keys(ui: &mut Ui, v: &View, s: &mut State) {
     }
 }
 
-fn engine(ui: &mut Ui, v: &View, s: &mut State, st: &Settings) {
+fn engine(ui: &mut Ui, v: &View, s: &mut State, st: Option<&Settings>) {
     let t = v.t;
-    if let Some(ver) = &s.engine_version {
-        ui.label(format!("Engine {ver} · protocol {}", crate::api::PROTOCOL_MAJOR));
-    }
-    let Some(c) = st.runtime.as_ref().and_then(|r| r.concurrency.as_ref()) else { return };
-    heading(ui, v, "Concurrency", "Set in the engine's config file; shown here read-only.");
-    egui::Grid::new("concurrency").num_columns(3).spacing([24.0, 4.0]).show(ui, |ui| {
-        ui.label(dim(&t, ""));
-        ui.label(dim(&t, "configured"));
-        ui.label(dim(&t, "in effect"));
-        ui.end_row();
-        for (name, a, b) in [
-            ("Concurrent runs", c.configured.max_concurrent, c.effective.max_concurrent),
-            ("Parallel candidates", c.configured.max_parallel_candidates, c.effective.max_parallel_candidates),
-            ("Deep-scan width", c.configured.max_deep_scan_width, c.effective.max_deep_scan_width),
-            ("Council members", c.configured.max_council_members, c.effective.max_council_members),
+    super::group(ui, &t, |ui| {
+        ui.label(RichText::new(format!("Claudexor for Linux {} · MIT", env!("CARGO_PKG_VERSION"))).size(T_SMALL).color(t.text));
+        match &s.engine_version {
+            Some(ver) => ui.label(dim(&t, format!("Engine {ver} · protocol {}", crate::api::PROTOCOL_MAJOR))),
+            None => ui.label(dim(&t, "Engine not connected")),
+        };
+    });
+    heading(ui, v, "Keyboard", "");
+    super::group(ui, &t, |ui| {
+        for (k, what) in [
+            ("Enter", "Send"),
+            ("Shift+Enter", "New line"),
+            ("Ctrl+Enter", "Send, or stop a running turn"),
+            ("Ctrl+N", "New thread (keeps the draft)"),
+            ("Ctrl+K", "Search threads"),
+            ("Alt+↑ / Alt+↓", "Previous / next thread"),
+            ("Ctrl+.", "Toggle the workspace panel"),
         ] {
-            ui.label(name);
-            ui.label(a.to_string());
-            ui.label(RichText::new(b.to_string()).color(if a == b { t.text } else { t.blocked }));
-            ui.end_row();
+            super::row(ui, &t, k, |ui| ui.label(RichText::new(what).size(T_SMALL).color(t.text)));
         }
     });
-    if c.restart_required {
-        ui.label(RichText::new("Restart the engine to apply the configured values.").size(T_SMALL).color(t.blocked));
-    }
+    let Some(c) = st.and_then(|st| st.runtime.as_ref()).and_then(|r| r.concurrency.as_ref()) else { return };
+    heading(ui, v, "Concurrency", "Set in the engine's config file; shown here read-only.");
+    super::group(ui, &t, |ui| {
+        egui::Grid::new("concurrency").num_columns(3).spacing([24.0, 4.0]).show(ui, |ui| {
+            ui.label(dim(&t, ""));
+            ui.label(dim(&t, "configured"));
+            ui.label(dim(&t, "in effect"));
+            ui.end_row();
+            for (name, a, b) in [
+                ("Concurrent runs", c.configured.max_concurrent, c.effective.max_concurrent),
+                ("Parallel candidates", c.configured.max_parallel_candidates, c.effective.max_parallel_candidates),
+                ("Deep-scan width", c.configured.max_deep_scan_width, c.effective.max_deep_scan_width),
+                ("Council members", c.configured.max_council_members, c.effective.max_council_members),
+            ] {
+                ui.label(RichText::new(name).size(T_SMALL));
+                ui.label(RichText::new(a.to_string()).size(T_SMALL));
+                ui.label(RichText::new(b.to_string()).size(T_SMALL).color(if a == b { t.text } else { t.blocked }));
+                ui.end_row();
+            }
+        });
+        if c.restart_required {
+            ui.label(RichText::new("Restart the engine to apply the configured values.").size(T_SMALL).color(t.blocked));
+        }
+    });
 }

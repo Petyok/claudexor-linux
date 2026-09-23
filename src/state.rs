@@ -52,6 +52,7 @@ pub enum Msg {
     Offline(String),
     Incompatible(String),
     ThreadsStale,
+    QuotaStale,
     Threads(Result<ThreadList, ApiError>),
     Thread(String, Result<ThreadDetail, ApiError>),
     Created(Result<Thread, ApiError>, PendingSend),
@@ -136,7 +137,6 @@ pub struct Live {
     pub waiting: bool,
     /// Engine routing notes worth surfacing (account switched at a quota limit, …).
     pub notes: Vec<String>,
-    pub started: Instant,
     pub finished: Option<Instant>,
     stop: Option<Arc<AtomicBool>>,
     /// Stream was lost (engine restart): restart it on reconnect.
@@ -151,7 +151,6 @@ impl Live {
             terminal: None,
             waiting: false,
             notes: vec![],
-            started: Instant::now(),
             finished: None,
             stop: None,
             lost: false,
@@ -188,6 +187,9 @@ pub struct Composer {
     pub picking: bool,
     /// Draft thread only: keep turns in a persistent thread worktree.
     pub isolated: bool,
+    /// Text of the send in flight: cleared from the field at once (optimistic),
+    /// restored if the engine refuses the request.
+    pub unsent: Option<String>,
     /// The "Options" knobs (strategy, access, review, budget, …).
     pub opts: TurnOpts,
 }
@@ -247,7 +249,8 @@ pub struct State {
     pub threads: Vec<Thread>,
     pub threads_loaded: bool,
     pub selected: Option<String>,
-    pub detail: Option<ThreadDetail>,
+    /// Shared so a frame's read is a refcount bump, not a deep clone of the thread.
+    pub detail: Option<Arc<ThreadDetail>>,
     pub detail_loading: bool,
     threads_flight: Flight,
     detail_flight: Flight,
@@ -257,6 +260,7 @@ pub struct State {
     /// turn id → stream id, for turns whose run id is not yet on the detail.
     pub turn_stream: HashMap<String, String>,
     pub details: HashMap<String, RunDetail>,
+    quota_at: Option<Instant>,
     /// Last live-driven detail refresh per run (throttle).
     detail_at: HashMap<String, Instant>,
     /// Workspace: a run's `final/patch.diff`, its produced outputs, action state.
@@ -272,11 +276,14 @@ pub struct State {
     /// Thread view: conversation (false) or the workspace panel (true),
     /// its tab (0 changes, 1 outputs, 2 evidence) and a one-run filter.
     pub ws_open: bool,
+    /// Scroll the conversation to its end on the next frame (after a send).
+    pub scroll_to_end: bool,
     pub ws_tab: u8,
     pub ws_run: Option<String>,
     /// Settings screen data (loaded when it opens).
     pub settings: Option<Fetch<Settings>>,
     pub settings_note: Option<Result<String, String>>,
+    pub settings_note_at: Option<Instant>,
     pub secrets: Option<Vec<Secret>>,
     pub trust_all: Option<Vec<TrustState>>,
     /// The thread list came from the offline cache, not the engine.
@@ -381,6 +388,7 @@ impl State {
             trust: HashMap::new(),
             applicability: HashMap::new(),
             detail_at: HashMap::new(),
+            quota_at: None,
             diffs: HashMap::new(),
             files: HashMap::new(),
             run_busy: HashSet::new(),
@@ -389,10 +397,12 @@ impl State {
             previews: HashMap::new(),
             viewing: None,
             ws_open: false,
+            scroll_to_end: false,
             ws_tab: 0,
             ws_run: None,
             settings: None,
             settings_note: None,
+            settings_note_at: None,
             secrets: None,
             trust_all: None,
             threads_cached: true,
@@ -455,6 +465,10 @@ impl State {
                         let r = client.stream("global/events", &mut parser, |f| {
                             if f.event == "thread.head.updated" && !stale.swap(true, Ordering::AcqRel) {
                                 Self::send(&tx, &ctx, Msg::ThreadsStale);
+                            }
+                            // the footer's quota % and "next up" follow the engine live
+                            if f.event == "quota.projection.updated" {
+                                Self::send(&tx, &ctx, Msg::QuotaStale);
                             }
                             true
                         });
@@ -679,6 +693,12 @@ impl State {
 
     // ---- settings ------------------------------------------------------------------
 
+    /// Record a settings outcome; "Saved" fades after two seconds.
+    pub fn note_settings(&mut self, note: Result<String, String>) {
+        self.settings_note = Some(note);
+        self.settings_note_at = Some(Instant::now());
+    }
+
     pub fn load_settings(&mut self) {
         if self.client.is_none() {
             return;
@@ -733,6 +753,8 @@ impl State {
         self.selected = id;
         self.detail = None;
         self.ws_run = None;
+        // a banner belongs to what you were looking at
+        self.error = None;
         self.detail_flight = Flight::default();
         self.refresh_detail();
     }
@@ -855,6 +877,8 @@ impl State {
             self.error = Some(e);
             return;
         }
+        // optimistic: the field empties now; a refused send puts the text back
+        self.composer.unsent = Some(std::mem::take(&mut self.composer.text));
         self.send_request(req);
     }
 
@@ -928,9 +952,9 @@ impl State {
         self.spawn(move |c| Msg::Acked("Answer", c.answer(&r, &i, &answers)));
     }
 
+    /// A new thread keeps the typed draft (Mac Cmd+N carries it over).
     pub fn new_thread(&mut self) {
         self.select(None);
-        self.composer.text.clear();
     }
 
     // ---- thread management -----------------------------------------------------------
@@ -1137,8 +1161,19 @@ impl State {
     }
 
     /// Open a URL without ever blocking the UI thread on a browser launch.
-    pub fn open_url(&self, url: &str) {
-        let url = url.to_string();
+    /// Hand a link or file to the desktop, but only what is safe to open:
+    /// web and mail links, or a viewer-type file inside the project or our
+    /// cache. Agents write the links in answers, and `xdg-open` on a script
+    /// or `.desktop` file can run it (Mac: only safe types inside the project).
+    pub fn open_url(&mut self, url: &str) {
+        let roots: Vec<std::path::PathBuf> = self.effective_root().map(Into::into).into_iter().chain(cache_dir()).collect();
+        match open_policy(url, &roots) {
+            Ok(target) => Self::launch(target),
+            Err(why) => self.error = Some(format!("Not opened: {why}")),
+        }
+    }
+
+    fn launch(url: String) {
         std::thread::spawn(move || {
             let _ = std::process::Command::new("xdg-open")
                 .arg(url)
@@ -1218,7 +1253,16 @@ impl State {
 
     fn apply(&mut self, m: Msg) {
         match m {
+            Msg::QuotaStale => {
+                // throttled: a burst of projection updates costs one read
+                if self.quota_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(10)) {
+                    self.quota_at = Some(Instant::now());
+                    self.spawn(|c| Msg::Quota(c.quota()));
+                    self.spawn(|c| Msg::Pools(c.account_pools()));
+                }
+            }
             Msg::Online(client, h) => {
+                self.error = None;
                 let engine = h.engine.as_ref().and_then(|e| e.version.clone()).unwrap_or_else(|| "unknown".into());
                 self.engine_version = Some(engine.clone());
                 self.conn = Conn::Online { engine };
@@ -1264,6 +1308,15 @@ impl State {
                         let mut threads: Vec<Thread> = list.threads;
                         threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                         save_thread_cache(&threads);
+                        // background threads too: announce any that just started needing you
+                        if self.threads_loaded {
+                            for th in &threads {
+                                let was = self.threads.iter().find(|x| x.id == th.id).is_some_and(|x| x.needs_human);
+                                if th.needs_human && !was && th.trashed_at.is_none() {
+                                    self.notices.push(Notice { title: "Claudexor · Needs your answer".into(), body: th.display_title().to_string() });
+                                }
+                            }
+                        }
                         self.threads = threads;
                         self.threads_loaded = true;
                         self.threads_cached = false;
@@ -1300,15 +1353,21 @@ impl State {
                 Err(e) => {
                     self.composer.sending = false;
                     self.note(&e);
+                    if let Some(text) = self.composer.unsent.take() {
+                        if self.composer.text.trim().is_empty() {
+                            self.composer.text = text;
+                        }
+                    }
                 }
             },
             Msg::TurnSent(tid, r, prompt) => {
                 self.composer.sending = false;
                 match r {
                     Ok(started) => {
-                        if prompt.is_some() && self.composer.text.trim() == prompt.as_deref().unwrap_or("").trim() {
-                            self.composer.text.clear();
+                        if prompt.is_some() {
                             self.composer.attachments.clear();
+                            self.composer.unsent = None;
+                            self.scroll_to_end = true;
                         }
                         if let Some(sid) = started.stream_id().map(str::to_owned) {
                             if let Some(turn) = &started.turn_id {
@@ -1323,6 +1382,12 @@ impl State {
                     }
                     Err(e) => {
                         self.note(&e);
+                        // the send failed: put the text back unless a new draft was started
+                        if let Some(text) = self.composer.unsent.take() {
+                            if self.composer.text.trim().is_empty() {
+                                self.composer.text = text;
+                            }
+                        }
                         if self.selected.as_deref() == Some(tid.as_str()) {
                             self.refresh_detail();
                         }
@@ -1525,18 +1590,18 @@ impl State {
             Msg::SettingsSaved(r) => match r {
                 Ok(st) => {
                     self.settings = Some(Fetch::Ready(st));
-                    self.settings_note = Some(Ok("Saved".into()));
+                    self.note_settings(Ok("Saved".into()));
                 }
-                Err(e) => self.settings_note = Some(Err(e.to_string())),
+                Err(e) => self.note_settings(Err(e.to_string())),
             },
             Msg::Secrets(r) => match r {
                 Ok(l) => self.secrets = Some(l.secrets),
-                Err(e) => self.settings_note = Some(Err(format!("Secrets: {e}"))),
+                Err(e) => self.note_settings(Err(format!("Secrets: {e}"))),
             },
             Msg::SecretChanged(what, r) => {
                 match r {
-                    Ok(()) => self.settings_note = Some(Ok(format!("{what}: done"))),
-                    Err(e) => self.settings_note = Some(Err(format!("{what}: {e}"))),
+                    Ok(()) => self.note_settings(Ok(format!("{what}: done"))),
+                    Err(e) => self.note_settings(Err(format!("{what}: {e}"))),
                 }
                 // auth readiness may have changed with the key
                 self.spawn(|c| Msg::Secrets(c.secrets()));
@@ -1544,7 +1609,7 @@ impl State {
             }
             Msg::TrustList(r) => match r {
                 Ok(l) => self.trust_all = Some(l.entries),
-                Err(e) => self.settings_note = Some(Err(format!("Trust: {e}"))),
+                Err(e) => self.note_settings(Err(format!("Trust: {e}"))),
             },
             Msg::Applicability(root, r) => match r {
                 Ok(a) => {
@@ -1735,7 +1800,7 @@ impl State {
                 }
             }
         }
-        self.detail = Some(d);
+        self.detail = Some(Arc::new(d));
     }
 
     /// Ask for the answer of a terminal run once (called while drawing).
@@ -1804,6 +1869,23 @@ pub fn failure_line(f: &RunFailure) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn open_policy_only_passes_safe_targets() {
+        let dir = std::env::temp_dir().join(format!("cxl-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["shot.png", "run.sh", "x.desktop"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        let roots = vec![dir.clone()];
+        assert!(open_policy("https://example.com/a", &roots).is_ok());
+        assert!(open_policy("javascript:alert(1)", &roots).is_err());
+        assert!(open_policy(dir.join("shot.png").to_str().unwrap(), &roots).is_ok());
+        assert!(open_policy(&format!("file://{}", dir.join("run.sh").display()), &roots).is_err());
+        assert!(open_policy(dir.join("x.desktop").to_str().unwrap(), &roots).is_err());
+        assert!(open_policy("/etc/hostname", &roots).is_err(), "outside the project");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn output_kinds() {
         assert_eq!(output_kind("shot.PNG", None), Some("image"));
@@ -2035,4 +2117,26 @@ fn file_error(e: &ApiError) -> String {
         ApiError::Decode(m) if m.contains("limit") || m.contains("too large") => "too large to preview".into(),
         e => e.to_string(),
     }
+}
+
+/// Decide whether `url` may go to `xdg-open`; returns what to open.
+fn open_policy(url: &str, roots: &[std::path::PathBuf]) -> Result<String, String> {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:") {
+        return Ok(url.to_string());
+    }
+    let path = url.strip_prefix("file://").unwrap_or(url);
+    if !path.starts_with('/') {
+        return Err(format!("{url} is not a web link or an absolute file path"));
+    }
+    let real = std::fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))?;
+    if !roots.iter().filter_map(|r| std::fs::canonicalize(r).ok()).any(|r| real.starts_with(&r)) {
+        return Err(format!("{path} is outside the project"));
+    }
+    let ext = real.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    const SAFE: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "pdf", "txt", "md", "log", "json", "csv", "yaml", "yml", "toml"];
+    if !SAFE.contains(&ext.as_str()) {
+        return Err(format!("“.{ext}” files could run code; use View instead"));
+    }
+    Ok(real.to_string_lossy().into_owned())
 }

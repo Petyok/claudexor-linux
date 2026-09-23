@@ -30,11 +30,16 @@ pub struct Tool {
     pub status: ToolStatus,
     pub detail: Option<String>,
     pub exit_code: Option<i64>,
+    /// Agent/Task tool: the subagent's description, and "type · model".
+    pub note: Option<String>,
+    pub sub: Option<String>,
+    /// A background launch: its result only means "started", never "done".
+    pub background: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
-    Thinking { id: String, text: String },
+    Thinking { id: String, text: String, secs: Option<i64> },
     Message { id: String, text: String },
     Tool { id: String, tool: Tool },
 }
@@ -66,6 +71,15 @@ pub struct Transcript {
     pub truncated_chars: usize,
     /// Highest seq folded; the SSE resume cursor.
     pub last_seq: i64,
+    /// The harness streaming this run (every harness event carries it).
+    pub harness: Option<String>,
+    /// Background subagents launched, and how many have finished: each
+    /// finish resumes the parent session with a fresh `started` event.
+    pub agents: usize,
+    pub agents_done: usize,
+    /// The typed final message: the answer when the run wrote no answer file.
+    pub final_text: Option<String>,
+    thinking_from: Option<i64>,
     text_chars: usize,
     tool_by_use_id: HashMap<String, usize>,
     open_tool_by_name: HashMap<String, usize>,
@@ -104,6 +118,11 @@ impl Transcript {
             trimmed: 0,
             truncated_chars: 0,
             last_seq: 0,
+            harness: None,
+            agents: 0,
+            agents_done: 0,
+            final_text: None,
+            thinking_from: None,
             text_chars: 0,
             tool_by_use_id: HashMap::new(),
             open_tool_by_name: HashMap::new(),
@@ -139,7 +158,18 @@ impl Transcript {
         }
         let Some(p) = event.get("payload") else { return false };
         let key = seq.to_string();
+        if self.harness.is_none() {
+            self.harness = s(p.get("harness_id"));
+        }
+        let ts = p.get("ts").and_then(Value::as_str).and_then(crate::ui::theme::parse_iso);
         match p.get("type").and_then(Value::as_str) {
+            Some("started") => {
+                if self.agents > self.agents_done {
+                    self.agents_done += 1;
+                    return true;
+                }
+                false
+            }
             Some("thinking") => {
                 let Some(text) = p.get("text").and_then(Value::as_str).filter(|t| !t.is_empty()) else {
                     return false;
@@ -149,13 +179,18 @@ impl Transcript {
                     let prev_n = prev.chars().count();
                     let bounded = self.bound(&merged, self.block_cap, true);
                     self.text_chars = self.text_chars + bounded.chars().count() - prev_n;
-                    if let Some(Block::Thinking { text: t, .. }) = self.blocks.last_mut() {
+                    let secs = self.thinking_from.zip(ts).map(|(a, b)| (b - a).max(0));
+                    if let Some(Block::Thinking { text: t, secs: sc, .. }) = self.blocks.last_mut() {
                         *t = bounded;
+                        if secs.is_some() {
+                            *sc = secs;
+                        }
                     }
                     self.enforce_budget();
                 } else {
+                    self.thinking_from = ts;
                     let t = self.bound(text, self.block_cap, true);
-                    self.append(Block::Thinking { id: format!("th-{key}"), text: t });
+                    self.append(Block::Thinking { id: format!("th-{key}"), text: t, secs: Some(0).filter(|_| ts.is_some()) });
                 }
                 true
             }
@@ -165,6 +200,7 @@ impl Transcript {
                     self.pending_flush = None;
                     self.finalized = true;
                     if let Some(final_text) = p.get("text").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+                        self.final_text = Some(clip(final_text, self.block_cap, false));
                         let cand = self.msg_candidate.clone();
                         self.remove_twin(cand.as_deref(), final_text);
                     }
@@ -174,7 +210,9 @@ impl Transcript {
                 let Some(text) = p.get("text").and_then(Value::as_str).filter(|t| !t.is_empty()) else {
                     return false;
                 };
-                if p.get("delta").and_then(Value::as_bool) == Some(true) {
+                // adapters nest the flag (`payload: {delta: true}`); older shapes had it flat
+                let delta = p.get("delta").or_else(|| p.get("payload").and_then(|x| x.get("delta"))).and_then(Value::as_bool) == Some(true);
+                if delta {
                     if self.finalized {
                         return false;
                     }
@@ -237,6 +275,14 @@ impl Transcript {
                     f("content_summary"),
                     tool.and_then(|t| t.get("exit_code")).and_then(Value::as_f64).map(|x| x as i64),
                 );
+                let mut block = block;
+                if matches!(block.name.as_str(), "Agent" | "Task") {
+                    let input = p.get("payload").and_then(|x| x.get("input"));
+                    let g = |k: &str| s(input.and_then(|i| i.get(k)));
+                    block.note = g("description");
+                    let sub: Vec<String> = [g("subagent_type"), g("model")].into_iter().flatten().collect();
+                    block.sub = Some(sub.join(" · ")).filter(|x| !x.is_empty());
+                }
                 let name = block.name.clone();
                 self.append(Block::Tool { id: format!("tool-{key}"), tool: block });
                 let idx = self.blocks.len() - 1;
@@ -262,8 +308,13 @@ impl Transcript {
                 if let Some(i) = idx.filter(|&i| i < self.blocks.len()) {
                     if let Block::Tool { .. } = &self.blocks[i] {
                         let bounded = detail.map(|d| self.bound(&d, self.tool_field_cap, false));
+                        let launched = detail_launch(tool);
+                        if launched {
+                            self.agents += 1;
+                        }
                         if let Block::Tool { tool: b, .. } = &mut self.blocks[i] {
                             b.status = status;
+                            b.background = launched;
                             if let Some(d) = bounded {
                                 let old = b.detail.as_ref().map_or(0, |x| x.chars().count());
                                 self.text_chars = self.text_chars + d.chars().count() - old;
@@ -293,6 +344,15 @@ impl Transcript {
         }
     }
 
+    /// The newest thing the run is doing, for a collapsed live card.
+    pub fn last_activity(&self) -> Option<String> {
+        self.blocks.iter().rev().find_map(|b| match b {
+            Block::Tool { tool, .. } => Some(tool.note.clone().unwrap_or_else(|| tool.name.clone())),
+            Block::Thinking { .. } => Some("Thinking".into()),
+            Block::Message { .. } => None,
+        })
+    }
+
     fn bounded_tool(
         &mut self,
         name: String,
@@ -310,6 +370,9 @@ impl Transcript {
             status,
             detail: detail.map(|d| self.bound(&d, c, false)),
             exit_code,
+            note: None,
+            sub: None,
+            background: false,
         }
     }
 
@@ -401,7 +464,19 @@ mod tests {
         t.apply(3, &h(json!({"type": "tool_call", "tool": {"name": "Read"}})));
         t.apply(4, &h(json!({"type": "thinking", "text": "c"})));
         assert_eq!(t.blocks.len(), 3);
-        assert_eq!(t.blocks[0], Block::Thinking { id: "th-1".into(), text: "a\nb".into() });
+        assert_eq!(t.blocks[0], Block::Thinking { id: "th-1".into(), text: "a\nb".into(), secs: None });
+    }
+
+    #[test]
+    fn nested_delta_flag_streams_one_block() {
+        // the live claude adapter shape: the flag sits in the harness event's own payload
+        let mut t = Transcript::default();
+        for (i, chunk) in ["I", "'", "m comparing the Lin", "ux eg"].iter().enumerate() {
+            t.apply(i as i64 + 1, &h(json!({"type": "message", "text": chunk, "payload": {"delta": true}})));
+        }
+        t.apply(9, &h(json!({"type": "message", "text": "I'm comparing the Linux eg"})));
+        let msgs: Vec<_> = t.blocks.iter().filter_map(|b| match b { Block::Message { text, .. } => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(msgs, vec!["I'm comparing the Linux eg"]);
     }
 
     #[test]
@@ -469,4 +544,29 @@ mod tests {
         assert_eq!(tool.name, "Long");
         assert_eq!(t.truncated_chars, 3 + 4);
     }
+}
+
+#[cfg(test)]
+mod replay {
+    /// `CXL_REPLAY=<events.jsonl> cargo test replay_log -- --nocapture`: fold a real run log.
+    #[test]
+    fn replay_log() {
+        let Ok(path) = std::env::var("CXL_REPLAY") else { return };
+        let mut t = super::Transcript::default();
+        for line in std::fs::read_to_string(path).unwrap().lines() {
+            let ev: serde_json::Value = serde_json::from_str(line).unwrap();
+            t.apply(ev["seq"].as_i64().unwrap_or(0), &ev);
+        }
+        for b in &t.blocks {
+            if let super::Block::Message { text, .. } = b {
+                println!("MSG {:?}", text.chars().take(70).collect::<String>());
+            }
+        }
+        println!("blocks {}", t.blocks.len());
+    }
+}
+
+/// An Agent/Task result that only reports a background launch.
+fn detail_launch(tool: Option<&Value>) -> bool {
+    tool.and_then(|t| t.get("content_summary")).and_then(Value::as_str).is_some_and(|x| x.starts_with("Async agent launched"))
 }

@@ -26,9 +26,9 @@ pub fn show(ctx: &egui::Context, v: &mut View, s: &mut State, anchor_bottom_left
                 ui.label(RichText::new("Accounts & quota").family(semibold()).size(T_BODY + 1.0).color(t.text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if s.quota_loading {
-                        ui.spinner();
+                        super::spinner(ui, 14.0, egui::Color32::GRAY);
                     } else if ui
-                        .add_enabled(s.client.is_some(), egui::Button::new(RichText::new("↻ Refresh").size(T_SMALL)))
+                        .add_enabled(s.client.is_some(), egui::Button::new(RichText::new(format!("{} Refresh", super::icons::REFRESH_CW)).size(T_SMALL)))
                         .on_hover_text("Ask every vendor for a fresh reading")
                         .clicked()
                     {
@@ -196,7 +196,7 @@ fn account_row(ui: &mut Ui, t: &Theme, s: &State, r: &crate::model::ProfileRow, 
                 }
             }
             let mut on = r.profile.enabled;
-            if ui.checkbox(&mut on, "").on_hover_text("Enabled: include this account in the routing pool").changed() {
+            if super::toggle_switch(ui, t, &mut on).on_hover_text("Enabled: include this account in the routing pool").changed() {
                 *act = Some(AcctAct::Enable(h.clone(), id.clone(), on));
             }
         });
@@ -281,13 +281,13 @@ fn login_panel(ui: &mut Ui, t: &Theme, s: &mut State) {
             match &job {
                 None if l.error.is_none() => {
                     ui.horizontal(|ui| {
-                        ui.spinner();
+                        super::spinner(ui, 14.0, egui::Color32::GRAY);
                         ui.label(dim(t, "Starting the login…"));
                     });
                 }
                 Some(j) if j.terminal() => {
                     let ok = j.state == "succeeded";
-                    let (c, g) = if ok { (t.success, "✔") } else { (t.failed, "✖") };
+                    let (c, g) = if ok { (t.success, super::icons::CIRCLE_CHECK) } else { (t.failed, super::icons::CIRCLE_X) };
                     let why = j.outcome.as_ref().map(|o| o.reason.replace('_', " ")).unwrap_or_else(|| j.state.replace('_', " "));
                     ui.label(RichText::new(if ok { format!("{g} Signed in") } else { format!("{g} {why}") }).color(c).size(T_SMALL + 1.0));
                     if !j.message.is_empty() {
@@ -330,7 +330,7 @@ fn login_panel(ui: &mut Ui, t: &Theme, s: &mut State) {
                             if d.flow == "oauth_url_input" {
                                 if l.code_sent {
                                     ui.horizontal(|ui| {
-                                        ui.spinner();
+                                        super::spinner(ui, 14.0, egui::Color32::GRAY);
                                         ui.label(dim(t, "Code sent, verifying…"));
                                     });
                                 } else {
@@ -349,7 +349,7 @@ fn login_panel(ui: &mut Ui, t: &Theme, s: &mut State) {
                         }
                         _ => {
                             ui.horizontal(|ui| {
-                                ui.spinner();
+                                super::spinner(ui, 14.0, egui::Color32::GRAY);
                                 ui.label(dim(t, "Waiting for the sign-in link (the vendor CLI takes ~20 s to start)…"));
                             });
                         }
