@@ -55,7 +55,14 @@ pub fn show(ctx: &egui::Context, v: &mut View, s: &mut State, anchor_bottom_left
                     ui.set_width(ui.available_width());
                     // a real minimum: without one egui kept the first frame's ~130 px and clipped the rows
                     let room = (anchor_bottom_left.y - 180.0).clamp(160.0, 460.0);
-                    ScrollArea::vertical().max_height(room).min_scrolled_height(room).auto_shrink([false, true]).show(ui, |ui| body(ui, &t, s));
+                    // bar pinned visible: an auto bar flip-flopped with the rows' wrap width (repaint loop)
+                    ScrollArea::vertical()
+                        .max_height(room)
+                        .min_scrolled_height(room)
+                        // fixed height: shrink-to-content let the viewport and the bar flip each frame
+                        .auto_shrink([false, false])
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                        .show(ui, |ui| body(ui, &t, s));
                 },
             );
         });
@@ -109,8 +116,13 @@ fn body_rows(ui: &mut Ui, t: &Theme, s: &State, act: &mut Option<AcctAct>) {
         harnesses.extend(q.absences.iter().map(|x| x.subject.harness.clone()));
     }
     harnesses.extend(s.pools.iter().map(|p| p.harness_id.clone()));
-    if harnesses.is_empty() {
-        ui.label(dim(t, if s.client.is_some() { "Loading…" } else { "Engine offline" }));
+    if harnesses.is_empty() || (s.profiles.is_none() && s.client.is_some()) {
+        ui.horizontal(|ui| {
+            if s.client.is_some() {
+                super::spinner(ui, 12.0, t.text2);
+            }
+            ui.label(dim(t, if s.client.is_some() { "Loading accounts…" } else { "Engine offline" }));
+        });
         return;
     }
     let busy = s.login.as_ref().is_some_and(|l| l.active());

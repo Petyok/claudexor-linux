@@ -528,13 +528,18 @@ impl State {
     }
 
     pub fn refresh_quota(&mut self, live: bool) {
-        if self.client.is_none() || self.quota_loading {
+        if self.client.is_none() {
+            return;
+        }
+        // accounts, routing and pending logins always refresh; only the quota
+        // read itself is single-flight (a live vendor refresh can be slow)
+        self.spawn(|c| Msg::Pools(c.account_pools()));
+        self.refresh_profiles();
+        if self.quota_loading {
             return;
         }
         self.quota_loading = true;
         self.spawn(move |c| Msg::Quota(if live { c.refresh_quota() } else { c.quota() }));
-        self.spawn(|c| Msg::Pools(c.account_pools()));
-        self.spawn(|c| Msg::Profiles(c.profiles()));
     }
 
     pub fn load_models(&mut self, harness: &str) {
@@ -1021,6 +1026,13 @@ impl State {
         self.pending_logins.iter().find(|j| j.harness == harness && (j.profile_id.as_deref() == Some(profile) || (j.profile_id.is_none() && default)))
     }
 
+    /// Usable for a turn: the harness is available, or one of its enabled
+    /// accounts is signed in (the harness summary never probes account logins).
+    pub fn harness_usable(&self, h: &crate::model::Harness) -> bool {
+        h.status != "unavailable"
+            || self.profiles.as_ref().is_some_and(|p| p.profiles.iter().any(|r| r.profile.harness_id == h.id && r.profile.enabled && r.ready()))
+    }
+
     /// Cancel a login job (e.g. one the CLI left waiting), then refresh.
     pub fn cancel_login_job(&mut self, job_id: &str) {
         let id = job_id.to_string();
@@ -1244,9 +1256,12 @@ impl State {
     // ---- reducer ------------------------------------------------------------------------
 
     /// Drain worker messages; called once per frame before drawing.
-    pub fn pump(&mut self) {
+    /// Apply pending engine messages; true when any arrived (state changed).
+    pub fn pump(&mut self) -> bool {
+        let mut any = false;
         while let Ok(m) = self.rx.try_recv() {
             self.apply(m);
+            any = true;
         }
         self.poll_login();
         // Fallback poll only while a turn in the open thread is pending with no
@@ -1259,6 +1274,7 @@ impl State {
             }
             self.ctx.request_repaint_after(Duration::from_secs(2));
         }
+        any
     }
 
     fn needs_poll(&self) -> bool {

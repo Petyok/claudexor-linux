@@ -173,7 +173,7 @@ fn routing(ui: &mut Ui, v: &View, s: &mut State, st: &Settings) {
     );
     heading(ui, v, "Primary harness", "Who answers when a turn names none. Engine routing picks by quota and readiness.");
     let ids: Vec<String> =
-        s.harnesses.iter().filter(|h| h.status != "unavailable" || r.primary_harness.as_deref() == Some(&h.id)).map(|h| h.id.clone()).collect();
+        s.harnesses.iter().filter(|h| s.harness_usable(h) || r.primary_harness.as_deref() == Some(&h.id)).map(|h| h.id.clone()).collect();
     ui.horizontal_wrapped(|ui| {
         if ui.selectable_label(r.primary_harness.is_none(), "Engine routing").clicked() && r.primary_harness.is_some() {
             s.save_settings(json!({ "primaryHarness": Value::Null }));

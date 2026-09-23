@@ -81,6 +81,8 @@ impl Prefs {
 struct App {
     /// Desktop colour scheme from the portal: 0 unknown · 1 dark · 2 light.
     desktop_dark: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    /// Follow-up frames still to paint after input or state changes.
+    settle: u8,
     state: State,
     glass: Glass,
     md: egui_commonmark::CommonMarkCache,
@@ -129,6 +131,7 @@ impl App {
         watch_desktop_scheme(desktop_dark.clone(), cc.egui_ctx.clone());
         App {
             desktop_dark,
+            settle: 0,
             state,
             glass: Glass { frost, refract, reduce_transparency: prefs.reduce_transparency, theme: theme::DARK },
             md: Default::default(),
@@ -196,13 +199,17 @@ impl eframe::App for App {
                 }
             }
         }
-        // Widgets react to a click after they've been drawn, so the frame that
-        // handled input still shows the old state: paint one follow-up frame.
-        // (Idle stays at 0 frames: the follow-up has no input and stops there.)
-        if ctx.input(|i| !i.events.is_empty()) {
+        // Widgets react to a click after they've been drawn, and popovers/panels
+        // size themselves over a couple of frames, so after input or an engine
+        // message paint a short settle burst. Idle still ends at 0 frames.
+        let changed = self.state.pump();
+        if changed || ctx.input(|i| !i.events.is_empty()) {
+            self.settle = 3;
+        }
+        if self.settle > 0 {
+            self.settle -= 1;
             ctx.request_repaint();
         }
-        self.state.pump();
         // Desktop notifications only when the user is elsewhere (window unfocused).
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
         for n in self.state.notices.drain(..) {

@@ -145,7 +145,7 @@ fn route_chip(ui: &mut Ui, v: &View, s: &mut State) {
         caption(ui, &t, "Harness");
         ui.selectable_value(&mut s.composer.harness, None, "Auto").on_hover_text("Let the engine route by quota and readiness");
         for x in &s.harnesses {
-            let ok = x.status != "unavailable";
+            let ok = s.harness_usable(x);
             let text = RichText::new(x.label()).color(if ok { t.harness(&x.id) } else { t.text3 });
             let resp = ui.add_enabled(ok, egui::Button::selectable(s.composer.harness.as_deref() == Some(&x.id), text));
             let resp = if x.reasons.is_empty() { resp } else { resp.on_hover_text(x.reasons.join("\n")) };
@@ -455,7 +455,7 @@ fn agent_options(ui: &mut Ui, v: &View, s: &mut State) {
         }
         Strategy::BestOf => {
             ui.label(dim(&t, "Pool (none = the engine picks two)"));
-            let ids: Vec<(String, bool)> = s.harnesses.iter().map(|h| (h.id.clone(), h.status != "unavailable")).collect();
+            let ids: Vec<(String, bool)> = s.harnesses.iter().map(|h| (h.id.clone(), s.harness_usable(h))).collect();
             for (id, ok) in ids {
                 let mut on = s.composer.opts.pool.contains(&id);
                 let changed = ui.add_enabled_ui(ok, |ui| row(ui, &t, &id, |ui| toggle_switch(ui, &t, &mut on).changed())).inner;
