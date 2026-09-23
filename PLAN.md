@@ -1,5 +1,9 @@
 # Claudexor for Linux: egui MVP plan
 
+> The original design plan, kept for context. Several items listed below as
+> out of scope (sign-in, trash, attachments) have since shipped; the README
+> lists what the app does today.
+
 A native Linux client for the Claudexor daemon, written in Rust with egui. It
 should look good, use very little CPU and memory, and have a Liquid Glass-style
 look.
@@ -25,8 +29,6 @@ look.
   frosted glass on cards, and code and dense text always sit on solid
   surfaces. Nothing animates when the app is idle. We follow the same rules.
 - License: MIT.
-- **Claudexor is not installed on this laptop yet** (`~/.claudexor` does not
-  exist). Phase 0 installs it.
 
 ## 1. Scope
 
@@ -191,7 +193,7 @@ days, mostly spent tuning the shader.
 - idle RSS: under 80 MB with glass on (`/proc/<pid>/status` VmRSS)
 - release binary: under 15 MB
 - cold start to first frame: under 300 ms
-- one frame with glass: under 4 ms on the iGPU
+- one frame with glass: under 4 ms on an integrated GPU
 
 ## 8. Risks
 

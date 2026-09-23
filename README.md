@@ -53,18 +53,24 @@ running (`CXL_NO_AUTOSTART=1` to opt out), and reconnects on its own.
 over a real socket, the transcript reducer, secure token reads, glyph coverage
 and WCAG contrast of the theme tokens.
 
-## Hyprland glass
+## Desktop blur
 
-The window is transparent; for the desktop to blur through it, keep
-`decoration:blur` enabled (default). Frosted popovers and refracting chrome
-work inside the window on any compositor.
+The window is transparent, so the compositor decides what shows through it.
+On Hyprland keep `decoration:blur` enabled (the default). KDE blurs only windows that
+request it, which this app does not do yet, and GNOME has no blur; there the
+app draws its own gradient.
+Frosted popovers and refracting chrome work inside the window on any
+compositor.
 
-## Measured on this laptop (Intel HD 6000, Mesa 26.2, 1180×780)
+## Performance
+
+Reference measurements on a low-end integrated GPU (Intel HD 6000, Mesa 26.2),
+1180×780 window:
 
 | Budget (PLAN §7) | Target | Measured |
 |---|---|---|
 | idle CPU | 0% | 0.03% (1 tick / 30 s: SSE heartbeat) |
 | cold start → window | < 300 ms | 220 ms |
 | frame with glass (GPU) | < 4 ms | 1.6 ms avg, 1.9 ms max |
-| release binary | < 15 MB | 10.6 MB |
-| idle RSS | < 80 MB | 94 MB VmRSS — 65 MB of it is Mesa's shared `libLLVM`/`libgallium`; app-private 22 MB, PSS 36 MB |
+| release binary | < 15 MB | 13.5 MB (with AccessKit) |
+| idle RSS | < 80 MB | 94 MB VmRSS, of which 65 MB is Mesa's shared `libLLVM`/`libgallium`; app-private 22 MB, PSS 36 MB |

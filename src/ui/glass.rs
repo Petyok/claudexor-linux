@@ -1,10 +1,10 @@
 //! Glass surfaces (PLAN §5), three layers each with a fallback:
 //! - L0: the window is transparent; `backdrop()` paints a translucent base so
-//!   a blurring compositor (Hyprland `decoration:blur`, KDE blur-behind) shows
+//!   a blurring compositor (e.g. Hyprland `decoration:blur`) shows
 //!   the desktop through it. Without compositor blur it still reads as a
 //!   graphite/off-white gradient.
-//! - L1: `backdrop-blur-egui` frosts the live framebuffer behind cards and
-//!   chrome (grab-pass on glow). Missing/failed renderer → solid surfaces.
+//! - L1: `backdrop-blur-egui` frosts the live framebuffer behind popovers
+//!   (grab-pass on glow; cards are film-only). Missing/failed renderer → solid surfaces.
 //! - L2: `refract` (below) bends the backdrop at the rim of chrome surfaces.
 //!
 //! Hard rule: never glass behind code, diffs or dense text — callers put those
