@@ -13,7 +13,7 @@ use theme::{R_SM, SP, T_SMALL, Theme};
 
 /// Every non-ASCII symbol the views draw (checked against the fonts in a test).
 #[cfg(test)]
-pub const GLYPHS: &str = "●○✔◆✖■◇⊘·◑▼▶↻×⎘↵⌃•…—−⚙📁";
+pub const GLYPHS: &str = "●○✔◆✖■◇⊘·◑▼▶▲↻×⎘↵⌃•…—−⚙📁←↑↓→";
 
 /// Everything a view needs besides the app state.
 pub struct View<'a> {

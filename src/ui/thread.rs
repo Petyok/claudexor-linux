@@ -19,6 +19,10 @@ use std::collections::HashMap;
 #[derive(Default)]
 pub struct Drafts {
     pub answers: HashMap<(String, String), (Vec<String>, String)>,
+    /// Plan answers: (plan run, question) → (picked option ids, own words).
+    pub plan: HashMap<(String, String), (Vec<String>, String)>,
+    /// Plan runs whose answers were just sent (until the follow-up turn shows up).
+    pub plan_sent: std::collections::HashSet<String>,
 }
 
 const MAX_ROWS: usize = 80;
@@ -44,7 +48,11 @@ pub fn show(ui: &mut Ui, v: &mut View, s: &mut State, drafts: &mut Drafts, rect:
 
 fn body(ui: &mut Ui, v: &mut View, s: &mut State, drafts: &mut Drafts, t: &Theme) {
     match (&s.conn, s.selected.is_some()) {
-        (Conn::Offline(why), _) if s.detail.is_none() => return empty(ui, v, "Engine offline", why, true),
+        (Conn::Offline(why), _) if s.detail.is_none() => {
+            let why = why.clone();
+            empty(ui, v, "Engine offline", &why, true);
+            return engine_button(ui, v, s);
+        }
         (Conn::Incompatible(why), _) => return empty(ui, v, "Incompatible engine", why, true),
         (Conn::Connecting, _) if s.detail.is_none() => {
             return empty(ui, v, "Connecting…", "Looking for the local Claudexor engine.", false);
@@ -92,7 +100,7 @@ fn body(ui: &mut Ui, v: &mut View, s: &mut State, drafts: &mut Drafts, t: &Theme
     let harness = detail.thread.primary_harness.clone();
     let n = detail.turns.len();
     for (i, turn) in detail.turns.iter().enumerate() {
-        turn_card(ui, v, s, drafts, turn, harness.as_deref(), i + 1 == n);
+        turn_card(ui, v, s, drafts, turn, &detail.turns[i + 1..], harness.as_deref(), i + 1 == n);
         ui.add_space(4.0 * SP);
     }
 }
@@ -148,14 +156,26 @@ fn turn_state(s: &State, turn: &Turn) -> String {
     }
 }
 
-fn turn_card(ui: &mut Ui, v: &mut View, s: &mut State, drafts: &mut Drafts, turn: &Turn, harness: Option<&str>, is_head: bool) {
+fn turn_card(
+    ui: &mut Ui,
+    v: &mut View,
+    s: &mut State,
+    drafts: &mut Drafts,
+    turn: &Turn,
+    later: &[Turn],
+    harness: Option<&str>,
+    is_head: bool,
+) {
     let t = v.t;
     // 1. user bubble, right-aligned, tinted by hue (not only alignment)
     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
         let max = ui.available_width() * 0.82;
         Frame::new().fill(t.user_bubble).corner_radius(R_MD).inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
             ui.set_max_width(max);
-            ui.add(egui::Label::new(RichText::new(&turn.prompt).color(t.text).size(T_BODY)).wrap().selectable(true));
+            // text reads left-to-right inside a right-aligned bubble
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                ui.add(egui::Label::new(RichText::new(&turn.prompt).color(t.text).size(T_BODY)).wrap().selectable(true));
+            });
         });
     });
     ui.add_space(2.0 * SP);
@@ -259,6 +279,8 @@ fn turn_card(ui: &mut Ui, v: &mut View, s: &mut State, drafts: &mut Drafts, turn
                 }
             }
         }
+        // 6. plan lifecycle (questions, Implement) and plan provenance receipts
+        plan_section(ui, v, s, drafts, turn, later, &state);
         let _ = is_head;
     });
     store_rect(ui, card_id, resp.response.rect);
@@ -266,10 +288,13 @@ fn turn_card(ui: &mut Ui, v: &mut View, s: &mut State, drafts: &mut Drafts, turn
 
 fn answer_bubble(ui: &mut Ui, v: &mut View, text: &str) {
     let t = v.t;
-    let r = Frame::new().fill(t.raised_hi).corner_radius(R_SM).inner_margin(Margin { left: 16, right: 14, top: 12, bottom: 12 }).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        egui_commonmark::CommonMarkViewer::new().show(ui, v.md, text);
-    });
+    let r = Frame::new().fill(t.raised_hi).corner_radius(R_SM).inner_margin(Margin { left: 16, right: 14, top: 12, bottom: 12 }).show(
+        ui,
+        |ui| {
+            ui.set_width(ui.available_width());
+            egui_commonmark::CommonMarkViewer::new().show(ui, v.md, text);
+        },
+    );
     // 2 pt accent leading edge (the answer is the loudest element in the feed),
     // painted after layout so it spans the real height, inside the left padding.
     let rect = r.response.rect;
@@ -531,7 +556,7 @@ fn question_card(ui: &mut Ui, v: &View, s: &mut State, drafts: &mut Drafts, it: 
                 ui.horizontal_wrapped(|ui| {
                     for o in &q.options {
                         let on = entry.0.contains(&o.label);
-                        let r = ui.selectable_label(on, &o.label);
+                        let r = ui.add(option_chip(&v.t, on, &o.label));
                         let r = match &o.description {
                             Some(d) => r.on_hover_text(d),
                             None => r,
@@ -571,4 +596,201 @@ fn question_card(ui: &mut Ui, v: &View, s: &mut State, drafts: &mut Drafts, it: 
             }
         });
     let _ = Color32::TRANSPARENT;
+}
+
+fn short(id: &str) -> &str {
+    &id[id.len().saturating_sub(6)..]
+}
+
+/// Plan lifecycle on a plan turn: server-derived readiness, the open-question
+/// card (answers go back as a follow-up plan turn tied by `answersPlanRunId`),
+/// and Implement (an agent turn with `planRunId`; the engine freezes the plan).
+/// Also the provenance receipts on the turns that answered / implemented one.
+fn plan_section(ui: &mut Ui, v: &View, s: &mut State, drafts: &mut Drafts, turn: &Turn, later: &[Turn], state: &str) {
+    let t = v.t;
+    if let Some(p) = &turn.plan_run_id {
+        let mut line = format!("Implements plan …{}", short(p));
+        if let Some(h) = &turn.plan_hash {
+            line.push_str(&format!(" · sha256 {}", &h[..h.len().min(12)]));
+        }
+        ui.horizontal(|ui| {
+            ui.label(dim(&t, line));
+            if turn.plan_readiness_overridden {
+                ui.label(RichText::new("· implemented over open questions").color(t.blocked).size(T_SMALL));
+            }
+        });
+    }
+    if let Some(p) = &turn.answers_plan_run_id {
+        ui.label(dim(&t, format!("Answers plan …{}", short(p))));
+    }
+    let Some(rid) = turn.run_id.clone() else { return };
+    let Some(detail) = s.details.get(&rid) else { return };
+    let Some(readiness) = detail.plan_readiness.clone() else { return };
+    if !matches!(state, "succeeded" | "blocked") {
+        return;
+    }
+    let questions = detail.plan_questions.clone();
+    let answered_later = later.iter().any(|x| x.answers_plan_run_id.as_deref() == Some(rid.as_str()));
+    let implemented_later = later.iter().any(|x| x.plan_run_id.as_deref() == Some(rid.as_str()));
+    let sent = drafts.plan_sent.contains(&rid);
+
+    ui.add_space(SP);
+    ui.horizontal(|ui| {
+        let (c, label) = match readiness.state.as_str() {
+            "ready" => (t.success, "Plan ready".to_string()),
+            "needs_answers" => {
+                let n = readiness.question_count.max(questions.len() as u32);
+                (t.needs_you, format!("{n} open question{}", if n == 1 { "" } else { "s" }))
+            }
+            _ => (t.blocked, "Plan unverified".to_string()),
+        };
+        chip(ui, &t, &label, c).on_hover_text(match readiness.state.as_str() {
+            "unverified" => "The planner did not produce a parseable open-questions block",
+            _ => "Readiness is derived by the engine from the plan's question block",
+        });
+        if implemented_later {
+            ui.label(dim(&t, "implemented below"));
+        } else if answered_later {
+            ui.label(dim(&t, "answered below"));
+        } else if sent {
+            ui.label(dim(&t, "answers sent…"));
+        }
+    });
+
+    let open = readiness.state == "needs_answers" && !questions.is_empty() && !answered_later && !sent && !implemented_later;
+    if open {
+        plan_questions_card(ui, v, s, drafts, &rid, &questions);
+    }
+    if implemented_later || answered_later {
+        return;
+    }
+    // Implement: straight when ready; otherwise an explicit, recorded override.
+    let busy = s.head_live_id().is_some() || s.composer.sending || s.client.is_none();
+    ui.add_space(SP);
+    ui.horizontal(|ui| {
+        if readiness.state == "ready" {
+            let b = egui::Button::new(RichText::new("Implement plan").color(t.on_accent)).fill(t.accent_solid).corner_radius(10);
+            if ui
+                .add_enabled(!busy, b)
+                .on_hover_text("Run an Agent turn against this frozen plan")
+                .on_disabled_hover_text("A turn is running or the engine is offline")
+                .clicked()
+            {
+                s.implement_plan(&rid, false);
+            }
+        } else {
+            let arm_id = Id::new(("implement-anyway", &rid));
+            let armed: bool = ui.ctx().data(|d| d.get_temp(arm_id)).unwrap_or(false);
+            let label = if armed { "Click again: implement over open questions" } else { "Implement anyway" };
+            let b = egui::Button::new(RichText::new(label).color(t.on_accent)).fill(t.blocked).corner_radius(10);
+            if ui
+                .add_enabled(!busy, b)
+                .on_hover_text("Recorded on the turn as a readiness override")
+                .on_disabled_hover_text("A turn is running or the engine is offline")
+                .clicked()
+            {
+                if armed {
+                    ui.ctx().data_mut(|d| d.remove::<bool>(arm_id));
+                    s.implement_plan(&rid, true);
+                } else {
+                    ui.ctx().data_mut(|d| d.insert_temp(arm_id, true));
+                }
+            }
+        }
+    });
+}
+
+fn plan_questions_card(ui: &mut Ui, v: &View, s: &mut State, drafts: &mut Drafts, rid: &str, questions: &[crate::model::PlanQuestion]) {
+    let t = v.t;
+    ui.add_space(SP);
+    Frame::new()
+        .fill(t.raised_hi)
+        .corner_radius(R_SM)
+        .inner_margin(Margin::symmetric(12, 10))
+        .stroke(Stroke::new(1.5_f32, t.needs_you))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Answer the plan's open questions").color(t.needs_you).family(semibold()).size(T_SMALL + 1.0));
+            ui.label(dim(&t, "Options are suggestions — your own words always count as a full answer."));
+            for q in questions {
+                ui.add_space(SP);
+                let key = (rid.to_string(), q.id.clone());
+                let entry = drafts.plan.entry(key).or_default();
+                ui.add(egui::Label::new(RichText::new(&q.prompt).color(t.text).size(T_BODY)).wrap().selectable(true));
+                if !q.options.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        for o in &q.options {
+                            let on = entry.0.contains(&o.id);
+                            if ui.add(option_chip(&t, on, &o.label)).clicked() {
+                                if q.kind == "multi" {
+                                    if on {
+                                        entry.0.retain(|x| x != &o.id);
+                                    } else {
+                                        entry.0.push(o.id.clone());
+                                    }
+                                } else {
+                                    entry.0 = if on { vec![] } else { vec![o.id.clone()] };
+                                }
+                                if !entry.0.is_empty() {
+                                    entry.1.clear(); // own words replace chips, never both
+                                }
+                            }
+                        }
+                    });
+                }
+                let hint = if q.kind == "text" { "Your answer" } else { "Or answer in your own words" };
+                if ui.add(egui::TextEdit::multiline(&mut entry.1).hint_text(hint).desired_rows(1).desired_width(f32::INFINITY)).changed()
+                    && !entry.1.trim().is_empty()
+                {
+                    entry.0.clear();
+                }
+            }
+            let picked = |qid: &str| drafts.plan.get(&(rid.to_string(), qid.to_string())).map(|e| e.0.clone()).unwrap_or_default();
+            let text = |qid: &str| drafts.plan.get(&(rid.to_string(), qid.to_string())).map(|e| e.1.clone()).unwrap_or_default();
+            let complete = crate::model::plan_answers_complete(questions, &picked, &text);
+            let prompt = crate::model::encode_plan_answers(questions, &picked, &text);
+            ui.add_space(SP);
+            let busy = s.head_live_id().is_some() || s.composer.sending || s.client.is_none();
+            let b = egui::Button::new(RichText::new("Send answers").color(t.on_accent)).fill(t.accent_solid).corner_radius(10);
+            if ui
+                .add_enabled(complete && !busy, b)
+                .on_disabled_hover_text(if busy { "A turn is running or the engine is offline" } else { "Answer every question first" })
+                .clicked()
+            {
+                s.answer_plan(rid, prompt);
+                drafts.plan.retain(|(r, _), _| r != rid);
+                drafts.plan_sent.insert(rid.to_string());
+            }
+        });
+}
+
+fn engine_button(ui: &mut Ui, v: &View, s: &mut State) {
+    let t = v.t;
+    ui.add_space(3.0 * SP);
+    ui.vertical_centered(|ui| {
+        if s.engine_starting {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(dim(&t, "Starting the engine…"));
+            });
+        } else {
+            let b = egui::Button::new(RichText::new("Start engine").color(t.on_accent)).fill(t.accent_solid).corner_radius(10);
+            if ui.add(b).on_hover_text("Runs `claudexor daemon start`").clicked() {
+                s.start_engine();
+            }
+        }
+        if let Some(e) = &s.engine_start_error {
+            ui.add(egui::Label::new(RichText::new(e).color(t.failed).size(T_SMALL)).wrap().selectable(true));
+        }
+    });
+}
+
+/// An answer option that reads as a clickable chip whether picked or not.
+fn option_chip<'a>(t: &Theme, on: bool, label: &'a str) -> egui::Button<'a> {
+    let text = RichText::new(label).size(T_SMALL + 1.0).color(if on { t.on_accent } else { t.text });
+    egui::Button::new(text)
+        .selected(on)
+        .fill(if on { t.accent_solid } else { t.raised })
+        .stroke(Stroke::new(1.0_f32, if on { t.accent } else { t.separator }))
+        .corner_radius(10)
 }

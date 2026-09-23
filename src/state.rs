@@ -67,6 +67,13 @@ pub enum Msg {
     Projects(Result<ProjectList, ApiError>),
     Acked(&'static str, Result<(), ApiError>),
     Rewatch(String),
+    ThreadChanged(&'static str, Result<Thread, ApiError>),
+    Profiles(Result<Profiles, ApiError>),
+    ProfileChanged(&'static str, Result<(), ApiError>, Option<(String, String)>),
+    Picked(Result<Vec<std::path::PathBuf>, String>),
+    Uploaded(u64, Result<Resource, String>),
+    EngineStarting,
+    EngineStart(Result<(), String>),
     LoginJob(Result<SetupJob, ApiError>),
     LoginSnap(Result<SetupSnapshot, ApiError>),
     LoginInput(Result<SetupJob, ApiError>),
@@ -125,6 +132,33 @@ pub struct Composer {
     /// Project root for a draft (new) thread; bound thread roots win.
     pub project: Option<String>,
     pub sending: bool,
+    /// Pin the turn to one account (credential profile); None = automatic routing.
+    pub account: Option<String>,
+    pub attachments: Vec<Attachment>,
+    /// In-flight native file picker / screen capture.
+    pub picking: bool,
+}
+
+pub struct Attachment {
+    pub local: u64,
+    pub name: String,
+    pub size: u64,
+    pub state: AttachState,
+}
+
+pub enum AttachState {
+    Uploading,
+    Ready(String),
+    Failed(String),
+}
+
+/// Largest file we read into memory for one attachment.
+const MAX_ATTACHMENT: u64 = 25 * 1024 * 1024;
+
+/// A desktop notification the app wants to show (main decides, by window focus).
+pub struct Notice {
+    pub title: String,
+    pub body: String,
 }
 
 /// Single-flight + one trailing request, so ping storms cost one fetch.
@@ -189,6 +223,15 @@ pub struct State {
     pub engine_version: Option<String>,
     /// The one in-app native login in flight (the daemon allows one per target).
     pub login: Option<Login>,
+    pub profiles: Option<Profiles>,
+    /// Sidebar shows the trash instead of live threads.
+    pub show_trash: bool,
+    /// Turn-finished / needs-you events; main shows them when the window is unfocused.
+    pub notices: Vec<Notice>,
+    /// `claudexor daemon start` in flight (auto on first launch, or the offline button).
+    pub engine_starting: bool,
+    pub engine_start_error: Option<String>,
+    next_local: u64,
 }
 
 /// In-app native login: the daemon runs the vendor CLI and publishes a
@@ -257,6 +300,12 @@ impl State {
             error: None,
             engine_version: None,
             login: None,
+            profiles: None,
+            show_trash: false,
+            notices: vec![],
+            engine_starting: false,
+            engine_start_error: None,
+            next_local: 1,
         };
         s.spawn_supervisor();
         s
@@ -284,6 +333,7 @@ impl State {
         std::thread::spawn(move || {
             let mut backoff = Duration::from_millis(500);
             let mut cursor: Option<String> = None;
+            let mut auto_started = false;
             loop {
                 match Client::connect() {
                     Ok((client, h)) if h.serving_mode.as_deref() == Some("recovery_only") => {
@@ -311,6 +361,14 @@ impl State {
                             _ => {}
                         }
                         // Loop: reconnect; a dead daemon fails `connect` below.
+                    }
+                    Err(ConnectError::NotRunning) if !auto_started && std::env::var_os("CXL_NO_AUTOSTART").is_none() => {
+                        // Like the macOS app launching its bundled daemon: start the
+                        // engine once per app launch, then retry at once.
+                        auto_started = true;
+                        Self::send(&tx, &ctx, Msg::EngineStarting);
+                        let r = start_engine_blocking();
+                        Self::send(&tx, &ctx, Msg::EngineStart(r.map(|_| ())));
                     }
                     Err(e) => {
                         let m = match &e {
@@ -352,6 +410,7 @@ impl State {
         self.quota_loading = true;
         self.spawn(move |c| Msg::Quota(if live { c.refresh_quota() } else { c.quota() }));
         self.spawn(|c| Msg::Pools(c.account_pools()));
+        self.spawn(|c| Msg::Profiles(c.profiles()));
     }
 
     pub fn load_models(&mut self, harness: &str) {
@@ -462,6 +521,8 @@ impl State {
             && !self.composer.sending
             && !self.composer.text.trim().is_empty()
             && self.head_live_id().is_none()
+            // an attachment the model never saw must never look delivered
+            && !self.composer.attachments.iter().any(|a| matches!(a.state, AttachState::Uploading))
     }
 
     pub fn submit(&mut self) {
@@ -470,13 +531,26 @@ impl State {
         }
         // A no-project thread is Ask-only (DESIGN_SYSTEM §5 composer rule).
         let mode = if self.effective_root().is_none() { "ask" } else { self.current_mode() };
-        let req = TurnRequest {
-            prompt: self.composer.text.trim().to_string(),
-            mode: mode.into(),
-            primary_harness: self.composer.harness.clone(),
-            model: self.composer.harness.as_ref().and(self.composer.model.clone()),
-            effort: self.composer.harness.as_ref().and(self.composer.effort.clone()),
-        };
+        let mut req = TurnRequest::new(self.composer.text.trim(), mode);
+        req.primary_harness = self.composer.harness.clone();
+        req.model = self.composer.harness.as_ref().and(self.composer.model.clone());
+        req.effort = self.composer.harness.as_ref().and(self.composer.effort.clone());
+        req.credential_profile_id = self.composer.harness.as_ref().and(self.composer.account.clone());
+        req.attachments = self
+            .composer
+            .attachments
+            .iter()
+            .filter_map(|a| match &a.state {
+                AttachState::Ready(id) => Some(ResourceRef { resource_id: id.clone() }),
+                _ => None,
+            })
+            .collect();
+        self.send_request(req);
+    }
+
+    /// Send a turn on the selected thread, or create the thread first (draft).
+    fn send_request(&mut self, req: TurnRequest) {
+        let mode = req.mode.clone();
         self.composer.sending = true;
         self.error = None;
         match self.selected.clone() {
@@ -533,9 +607,164 @@ impl State {
         self.composer.text.clear();
     }
 
+    // ---- thread management -----------------------------------------------------------
+
+    pub fn rename_thread(&mut self, id: &str, title: &str) {
+        let (id, title) = (id.to_string(), title.trim().to_string());
+        if title.is_empty() {
+            return;
+        }
+        self.spawn(move |c| Msg::ThreadChanged("Rename", c.update_thread(&id, serde_json::json!({ "title": title }))));
+    }
+
+    /// Archive (`closed`) or reopen (`active`).
+    pub fn set_thread_state(&mut self, id: &str, state: &str) {
+        let (id, state) = (id.to_string(), state.to_string());
+        self.spawn(move |c| Msg::ThreadChanged("Archive", c.update_thread(&id, serde_json::json!({ "state": state }))));
+    }
+
+    /// `trash` | `restore` | `purge` (purge is permanent; UI confirms first).
+    pub fn thread_action(&mut self, id: &str, action: &'static str) {
+        let id = id.to_string();
+        if matches!(action, "trash" | "purge") && self.selected.as_deref() == Some(id.as_str()) {
+            self.select(None);
+        }
+        self.spawn(move |c| Msg::ThreadChanged(action, c.thread_action(&id, action)));
+    }
+
+    // ---- plan lifecycle -----------------------------------------------------------------
+
+    /// Answers go back as an ordinary follow-up PLAN turn, tied to the plan by
+    /// `answersPlanRunId` (the same conversation continues toward `ready`).
+    pub fn answer_plan(&mut self, plan_run_id: &str, prompt: String) {
+        let mut req = TurnRequest::new(prompt, "plan");
+        req.answers_plan_run_id = Some(plan_run_id.to_string());
+        req.primary_harness = self.composer.harness.clone();
+        self.send_request(req);
+    }
+
+    /// Implement freezes the plan server-side (hash on the turn). `force` is the
+    /// explicit, recorded override for a plan that still has open questions.
+    pub fn implement_plan(&mut self, plan_run_id: &str, force: bool) {
+        let mut req = TurnRequest::new("Implement this plan.", "agent");
+        req.plan_run_id = Some(plan_run_id.to_string());
+        req.override_plan_readiness = force.then_some(true);
+        req.primary_harness = self.composer.harness.clone();
+        self.send_request(req);
+    }
+
+    // ---- accounts --------------------------------------------------------------------
+
+    pub fn refresh_profiles(&mut self) {
+        self.spawn(|c| Msg::Profiles(c.profiles()));
+    }
+
+    pub fn set_profile_enabled(&mut self, harness: &str, profile: &str, enabled: bool) {
+        let (h, p) = (harness.to_string(), profile.to_string());
+        self.spawn(move |c| Msg::ProfileChanged("Update account", c.set_profile_enabled(&h, &p, enabled).map(drop), None));
+    }
+
+    pub fn delete_profile(&mut self, harness: &str, profile: &str) {
+        let (h, p) = (harness.to_string(), profile.to_string());
+        if self.composer.account.as_deref() == Some(profile) {
+            self.composer.account = None;
+        }
+        self.spawn(move |c| Msg::ProfileChanged("Remove account", c.delete_profile(&h, &p).map(drop), None));
+    }
+
+    /// Add an account row, then start its login in the same action.
+    pub fn add_account(&mut self, harness: &str, name: &str) {
+        let slug: String = name
+            .trim()
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+            .split('-')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        let profile = if slug.is_empty() { format!("{harness}-{}", self.next_local) } else { format!("{harness}-{slug}") };
+        self.next_local += 1;
+        let (h, p, display) = (harness.to_string(), profile, name.trim().to_string());
+        self.spawn(move |c| {
+            let r = c.create_profile(&h, &p, Some(display.as_str()).filter(|d| !d.is_empty())).map(drop);
+            Msg::ProfileChanged("Add account", r, Some((h, p)))
+        });
+    }
+
+    // ---- attachments -----------------------------------------------------------------
+
+    /// Native file chooser (zenity/kdialog), off the UI thread.
+    pub fn pick_files(&mut self) {
+        if self.composer.picking {
+            return;
+        }
+        self.composer.picking = true;
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || Self::send(&tx, &ctx, Msg::Picked(run_file_picker())));
+    }
+
+    /// Region screenshot with grim + slurp (Wayland), off the UI thread.
+    pub fn capture_region(&mut self) {
+        if self.composer.picking {
+            return;
+        }
+        self.composer.picking = true;
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || Self::send(&tx, &ctx, Msg::Picked(run_capture())));
+    }
+
+    pub fn attach_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        for path in paths {
+            let local = self.next_local;
+            self.next_local += 1;
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let state = if size > MAX_ATTACHMENT {
+                AttachState::Failed(format!("larger than {} MB", MAX_ATTACHMENT / 1024 / 1024))
+            } else {
+                AttachState::Uploading
+            };
+            let uploading = matches!(state, AttachState::Uploading);
+            self.composer.attachments.push(Attachment { local, name: name.clone(), size, state });
+            if uploading {
+                self.spawn(move |c| {
+                    let r = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| {
+                        let (kind, mime) = mime_for(&name);
+                        c.upload(&name, kind, mime, &bytes).map_err(|e| e.to_string())
+                    });
+                    Msg::Uploaded(local, r)
+                });
+            }
+        }
+    }
+
+    pub fn remove_attachment(&mut self, local: u64) {
+        self.composer.attachments.retain(|a| a.local != local);
+    }
+
+    // ---- engine ----------------------------------------------------------------------
+
+    /// The offline screen's "Start engine" (the supervisor reconnects on its own).
+    pub fn start_engine(&mut self) {
+        if self.engine_starting {
+            return;
+        }
+        self.engine_starting = true;
+        self.engine_start_error = None;
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || Self::send(&tx, &ctx, Msg::EngineStart(start_engine_blocking().map(drop))));
+    }
+
     // ---- native login -----------------------------------------------------------------
 
     pub fn start_login(&mut self, harness: &str) {
+        self.start_login_for(harness, None);
+    }
+
+    /// Login for one exact account (profile-targeted setup job), or the bootstrap one.
+    pub fn start_login_for(&mut self, harness: &str, profile: Option<String>) {
         self.login = Some(Login {
             harness: harness.to_string(),
             job: None,
@@ -548,7 +777,7 @@ impl State {
             auto_extended: false,
         });
         let h = harness.to_string();
-        self.spawn(move |c| Msg::LoginJob(c.start_login(&h)));
+        self.spawn(move |c| Msg::LoginJob(c.start_login(&h, profile.as_deref())));
     }
 
     pub fn submit_login_code(&mut self) {
@@ -704,7 +933,8 @@ impl State {
                 let again = self.threads_flight.finish();
                 match r {
                     Ok(list) => {
-                        let mut threads: Vec<Thread> = list.threads.into_iter().filter(|t| t.trashed_at.is_none()).collect();
+                        // keep trashed rows too: the sidebar's Trash view lists them
+                        let mut threads: Vec<Thread> = list.threads;
                         threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                         self.threads = threads;
                         self.threads_loaded = true;
@@ -749,6 +979,7 @@ impl State {
                     Ok(started) => {
                         if prompt.is_some() && self.composer.text.trim() == prompt.as_deref().unwrap_or("").trim() {
                             self.composer.text.clear();
+                            self.composer.attachments.clear();
                         }
                         if let Some(sid) = started.stream_id().map(str::to_owned) {
                             if let Some(turn) = &started.turn_id {
@@ -790,6 +1021,28 @@ impl State {
                     _ => {}
                 }
                 let waiting = live.waiting;
+                // Desktop notice for LIVE transitions only: replaying an old run's log
+                // (expanding its activity) must not re-announce it.
+                let fresh = ev
+                    .get("ts")
+                    .and_then(Value::as_str)
+                    .and_then(crate::ui::theme::parse_iso)
+                    .is_some_and(|t| crate::ui::theme::now_unix() - t < 60);
+                let word = match kind.as_str() {
+                    "run.completed" => Some("Done"),
+                    "run.blocked" => Some("Needs a decision"),
+                    "run.failed" => Some("Failed"),
+                    "interaction.requested" => Some("Needs your answer"),
+                    _ => None,
+                };
+                if let (true, Some(word)) = (fresh, word) {
+                    let tid = ev.get("thread_id").and_then(Value::as_str);
+                    let title = tid.and_then(|t| self.threads.iter().find(|x| x.id == t)).map(|t| t.display_title().to_string());
+                    self.notices
+                        .push(Notice {
+                            title: format!("Claudexor · {word}"), body: title.unwrap_or_else(|| "A run changed state".into())
+                        });
+                }
                 if let Some(rid) = run_id {
                     // A queued turn streamed by job id: alias the run id to the same box
                     // is unnecessary — lookups go through turn_stream — but interactions
@@ -888,6 +1141,54 @@ impl State {
                     if self.composer.project.is_none() {
                         self.composer.project = self.projects.first().map(|p| p.root.clone());
                     }
+                }
+            }
+            Msg::ThreadChanged(what, r) => {
+                if let Err(e) = r {
+                    self.error = Some(format!("{what} failed: {e}"));
+                }
+                self.refresh_threads();
+                self.refresh_detail();
+            }
+            Msg::Profiles(r) => match r {
+                Ok(p) => self.profiles = Some(p),
+                Err(e) => self.note(&e),
+            },
+            Msg::ProfileChanged(what, r, login_after) => {
+                match r {
+                    Ok(()) => {
+                        if let Some((h, p)) = login_after {
+                            self.start_login_for(&h, Some(p));
+                        }
+                    }
+                    Err(e) => self.error = Some(format!("{what} failed: {e}")),
+                }
+                self.refresh_profiles();
+                self.refresh_quota(false);
+            }
+            Msg::Picked(r) => {
+                self.composer.picking = false;
+                match r {
+                    Ok(paths) => self.attach_paths(paths),
+                    Err(e) => self.error = Some(e),
+                }
+            }
+            Msg::Uploaded(local, r) => {
+                if let Some(a) = self.composer.attachments.iter_mut().find(|a| a.local == local) {
+                    a.state = match r {
+                        Ok(res) => AttachState::Ready(res.resource_id),
+                        Err(e) => AttachState::Failed(e),
+                    };
+                }
+            }
+            Msg::EngineStarting => {
+                self.engine_starting = true;
+                self.engine_start_error = None;
+            }
+            Msg::EngineStart(r) => {
+                self.engine_starting = false;
+                if let Err(e) = r {
+                    self.engine_start_error = Some(e);
                 }
             }
             Msg::LoginJob(r) => {
@@ -1055,5 +1356,97 @@ mod tests {
         assert_eq!(failure_line(&f).as_deref(), Some("no doctor-OK default route (harness_unavailable)"));
         let f: RunFailure = serde_json::from_value(serde_json::json!({"category": "budget", "code": "hard_cap"})).unwrap();
         assert_eq!(failure_line(&f).as_deref(), Some("hard_cap"));
+    }
+}
+
+/// The `claudexor` CLI: PATH first, then the usual npm/nvm locations (a
+/// launcher-started app does not inherit nvm's shell PATH).
+pub fn find_claudexor() -> Option<std::path::PathBuf> {
+    let on_path =
+        std::env::var_os("PATH").into_iter().flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).map(|d| d.join("claudexor"));
+    let home = dirs::home_dir().unwrap_or_default();
+    let mut extra =
+        vec![home.join(".claudexor/node/bin/claudexor"), home.join(".local/bin/claudexor"), home.join(".npm-global/bin/claudexor")];
+    if let Ok(rd) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+        let mut vs: Vec<_> = rd.flatten().map(|e| e.path().join("bin/claudexor")).collect();
+        vs.sort();
+        extra.extend(vs.into_iter().rev()); // newest node first
+    }
+    on_path.chain(extra).find(|p| p.is_file())
+}
+
+/// `claudexor daemon start` (returns once the daemon reports ready or fails).
+pub fn start_engine_blocking() -> Result<String, String> {
+    let bin = find_claudexor().ok_or("claudexor CLI not found (install it with `npm install -g claudexor`)")?;
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.args(["daemon", "start"]).stdin(std::process::Stdio::null());
+    // nvm installs need their node next to the script's `#!/usr/bin/env node`.
+    if let Some(dir) = bin.parent() {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![dir.to_path_buf()];
+        paths.extend(std::env::split_paths(&path));
+        if let Ok(p) = std::env::join_paths(paths) {
+            cmd.env("PATH", p);
+        }
+    }
+    let out = cmd.output().map_err(|e| format!("could not run {}: {e}", bin.display()))?;
+    let text = String::from_utf8_lossy(if out.status.success() { &out.stdout } else { &out.stderr }).trim().to_string();
+    if out.status.success() { Ok(text) } else { Err(if text.is_empty() { format!("daemon start exited {}", out.status) } else { text }) }
+}
+
+/// zenity (GTK) or kdialog file chooser; Ok(empty) when the user cancels.
+fn run_file_picker() -> Result<Vec<std::path::PathBuf>, String> {
+    use std::process::Command;
+    let out = Command::new("zenity")
+        .args(["--file-selection", "--multiple", "--separator=\n", "--title=Attach files"])
+        .output()
+        .or_else(|_| Command::new("kdialog").args(["--getopenfilename", ".", "--multiple", "--separate-output"]).output())
+        .map_err(|_| "no file chooser found (install zenity or kdialog)".to_string())?;
+    Ok(String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.trim().is_empty()).map(std::path::PathBuf::from).collect())
+}
+
+/// `slurp` picks a region, `grim` captures it into a private temp file.
+/// A cancelled selection yields no attachment — never a blank image.
+fn run_capture() -> Result<Vec<std::path::PathBuf>, String> {
+    use std::process::Command;
+    let region = Command::new("slurp").output().map_err(|_| "screen capture needs grim + slurp".to_string())?;
+    if !region.status.success() {
+        return Ok(vec![]); // Esc in slurp
+    }
+    let geometry = String::from_utf8_lossy(&region.stdout).trim().to_string();
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let path = dir.join(format!("claudexor-capture-{stamp}.png"));
+    let st = Command::new("grim").args(["-g", &geometry]).arg(&path).status().map_err(|e| e.to_string())?;
+    if !st.success() || !path.is_file() {
+        return Err("grim could not capture the region".into());
+    }
+    Ok(vec![path])
+}
+
+/// Upload kind + MIME from the file name (the daemon revalidates the bytes).
+pub fn mime_for(name: &str) -> (&'static str, &'static str) {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => ("image", "image/png"),
+        "jpg" | "jpeg" => ("image", "image/jpeg"),
+        "gif" => ("image", "image/gif"),
+        "webp" => ("image", "image/webp"),
+        "pdf" => ("file", "application/pdf"),
+        "json" => ("file", "application/json"),
+        "md" | "markdown" => ("file", "text/markdown"),
+        "txt" | "log" | "rs" | "ts" | "js" | "py" | "go" | "java" | "c" | "h" | "cpp" | "toml" | "yaml" | "yml" | "sh" | "swift" | "kt"
+        | "rb" | "css" | "html" | "sql" | "csv" | "xml" => ("file", "text/plain"),
+        _ => ("file", "application/octet-stream"),
+    }
+}
+
+#[cfg(test)]
+mod attach_tests {
+    #[test]
+    fn mime_detection() {
+        assert_eq!(super::mime_for("Shot.PNG"), ("image", "image/png"));
+        assert_eq!(super::mime_for("main.rs"), ("file", "text/plain"));
+        assert_eq!(super::mime_for("blob"), ("file", "application/octet-stream"));
     }
 }

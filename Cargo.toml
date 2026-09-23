@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 # eframe/egui pinned to 0.34: backdrop-blur-egui 0.2 (frosted panels, PLAN §5 L1)
 # targets exactly this egui line.
-eframe = { version = "0.34.3", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
+eframe = { version = "0.34.3", default-features = false, features = ["glow", "wayland", "x11", "default_fonts", "accesskit"] }
 egui = "0.34.3"
 egui_glow = "0.34"
 glow = "0.17"

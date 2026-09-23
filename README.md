@@ -12,12 +12,29 @@ cargo build --release
 ./packaging/install.sh          # ~/.local/bin + app launcher entry + icon
 ```
 
-Sign in from the app: Accounts (bottom-left) → **Log in** next to a harness whose engine
-offers in-app login (Claude today): open the link, paste the code back.
+The app finds the daemon through `~/.claudexor/v3/daemon/control-api.json` (or
+`$CLAUDEXOR_CONFIG_DIR`), starts it once with `claudexor daemon start` if it is not
+running (`CXL_NO_AUTOSTART=1` to opt out), and reconnects on its own.
 
-The daemon must be running (`claudexor daemon start`); the app finds it through
-`~/.claudexor/v3/daemon/control-api.json` (or `$CLAUDEXOR_CONFIG_DIR`) and
-reconnects on its own.
+## What it does
+
+- **Threads**: create, search (Ctrl+K), rename / archive / trash / restore / delete
+  forever (right-click a thread), Alt+↑/↓ to move between them.
+- **Conversation**: answers as markdown, a receipt per turn (status, harness, the
+  model that actually answered, time, cost, tools), live activity (thinking, tool
+  rows) streamed over SSE and resumed without duplicates after an engine restart,
+  refused / failed cards with the engine's own message, interactive questions.
+- **Plan**: readiness chip, answer the plan's open questions (sent as a follow-up
+  plan turn), **Implement plan** / **Implement anyway** (recorded override).
+- **Composer**: Ask / Plan / Agent, project, harness, model, effort, account pin,
+  attachments (file chooser via zenity/kdialog, screen region via grim + slurp),
+  Send / Stop / Retry.
+- **Accounts**: per-account readiness and quota windows, Enabled toggle, in-app
+  **Log in** (open the link, paste the code back), Add account, Remove.
+- **Desktop notifications** (notify-send) when a turn finishes or needs you and the
+  window is not focused.
+- **Glass**: compositor blur behind the window, frosted popovers, a refraction shader
+  on the chrome; light/dark/system themes and Reduce transparency (⚙ menu).
 
 ## Tools
 
@@ -28,6 +45,7 @@ reconnects on its own.
 | `CXL_FRAMESTATS=1` | print GL renderer and GPU/CPU ms per frame (forces continuous repaint) |
 | `CXL_NO_FROST=1`, `CXL_NO_REFRACT=1` | switch off the L1 / L2 glass layers |
 | `CXL_REPAINT_DEBUG=1` | print why each frame was repainted (idle-cost debugging) |
+| `CXL_NO_AUTOSTART=1` | never start the daemon from the app |
 | `CLAUDEXOR_REDUCE_TRANSPARENCY=1` | start with solid surfaces (also a toggle in the ⚙ menu) |
 
 `cargo test` decodes the upstream wire fixtures and `tests/fixtures/live/`

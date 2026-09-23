@@ -145,6 +145,16 @@ pub struct Turn {
     pub enqueue_error: Option<EnqueueError>,
     #[serde(default)]
     pub created_at: String,
+    /// This turn answers the open questions of that plan run.
+    #[serde(default)]
+    pub answers_plan_run_id: Option<String>,
+    /// This turn implements that plan run (frozen by hash).
+    #[serde(default)]
+    pub plan_run_id: Option<String>,
+    #[serde(default)]
+    pub plan_hash: Option<String>,
+    #[serde(default)]
+    pub plan_readiness_overridden: bool,
 }
 
 /// The compact run card embedded on a turn (no N+1 detail fetch for the list).
@@ -238,6 +248,124 @@ pub struct TurnRequest {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Pin this turn to one account; unknown/disabled ids refuse, never default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_profile_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ResourceRef>,
+    /// A Plan follow-up that answers this plan run's open questions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answers_plan_run_id: Option<String>,
+    /// An Agent turn that implements this (frozen) plan run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_run_id: Option<String>,
+    /// Explicit, recorded override: implement although questions remain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_plan_readiness: Option<bool>,
+}
+
+impl TurnRequest {
+    pub fn new(prompt: impl Into<String>, mode: &str) -> Self {
+        TurnRequest {
+            prompt: prompt.into(),
+            mode: mode.into(),
+            primary_harness: None,
+            model: None,
+            effort: None,
+            credential_profile_id: None,
+            attachments: vec![],
+            answers_plan_run_id: None,
+            plan_run_id: None,
+            override_plan_readiness: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceRef {
+    pub resource_id: String,
+}
+
+/// `ControlResource` (upload finalize result).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Resource {
+    pub resource_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadStatus {
+    pub upload_id: String,
+}
+
+// ---- credential profiles (accounts) ------------------------------------------------
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Profiles {
+    #[serde(default, deserialize_with = "lossy")]
+    pub profiles: Vec<ProfileRow>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileRow {
+    pub profile: Profile,
+    #[serde(default)]
+    pub status: Option<ProfileStatus>,
+    #[serde(default)]
+    pub identity: Option<Identity>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Profile {
+    pub profile_id: String,
+    pub harness_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub credential_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileStatus {
+    /// available | unavailable | unknown
+    #[serde(default)]
+    pub availability: String,
+    /// passed | failed | not_run
+    #[serde(default)]
+    pub verification: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Identity {
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub plan: Option<String>,
+}
+
+impl ProfileRow {
+    /// Ready means THIS exact source is available + passed, never aggregate harness health.
+    pub fn ready(&self) -> bool {
+        self.status.as_ref().is_some_and(|s| s.availability == "available" && s.verification == "passed")
+    }
+    pub fn label(&self) -> String {
+        self.identity
+            .as_ref()
+            .and_then(|i| i.email.clone())
+            .or_else(|| self.profile.display_name.clone())
+            .unwrap_or_else(|| self.profile.profile_id.clone())
+    }
 }
 
 /// `ControlThreadTurnResponse`: 200 = started (runId), 202 = queued (jobId + state).
@@ -276,6 +404,63 @@ pub struct RunDetail {
     pub last_seq: Option<i64>,
     #[serde(default, deserialize_with = "lossy")]
     pub pending_interactions: Vec<Interaction>,
+    /// Open questions of a plan run (parsed once by the engine); empty otherwise.
+    #[serde(default, deserialize_with = "lossy")]
+    pub plan_questions: Vec<PlanQuestion>,
+    /// ready | needs_answers | unverified; None for non-plan runs.
+    #[serde(default)]
+    pub plan_readiness: Option<PlanReadiness>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlanQuestion {
+    pub id: String,
+    /// single | multi | text
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default, deserialize_with = "lossy")]
+    pub options: Vec<PlanOption>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlanOption {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanReadiness {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub question_count: u32,
+}
+
+/// Follow-up prompt for plan answers (same encoding as ClaudexorKit's
+/// `PlanAnswerComposer`): one line per question, option LABELS, or the
+/// user's own words instead of the chips.
+pub fn encode_plan_answers(questions: &[PlanQuestion], picked: &dyn Fn(&str) -> Vec<String>, text: &dyn Fn(&str) -> String) -> String {
+    let mut lines = vec!["Answers to your plan questions:".to_string()];
+    for q in questions {
+        let own = text(&q.id).trim().to_string();
+        let labels: Vec<String> = q.options.iter().filter(|o| picked(&q.id).contains(&o.id)).map(|o| o.label.clone()).collect();
+        let parts = if own.is_empty() { labels } else { vec![own] };
+        let answer = if parts.is_empty() { "(no answer)".to_string() } else { parts.join(", ") };
+        lines.push(format!("- {} → {answer}", q.prompt));
+    }
+    lines.join("\n")
+}
+
+/// Every question answered: text needs words; single/multi need a pick or own words.
+pub fn plan_answers_complete(questions: &[PlanQuestion], picked: &dyn Fn(&str) -> Vec<String>, text: &dyn Fn(&str) -> String) -> bool {
+    !questions.is_empty()
+        && questions.iter().all(|q| {
+            let typed = !text(&q.id).trim().is_empty();
+            if q.kind == "text" { typed } else { typed || !picked(&q.id).is_empty() }
+        })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -773,7 +958,7 @@ mod tests {
 
     #[test]
     fn turn_request_omits_unset_fields() {
-        let r = TurnRequest { prompt: "hi".into(), mode: "ask".into(), primary_harness: None, model: None, effort: None };
+        let r = TurnRequest::new("hi", "ask");
         assert_eq!(serde_json::to_value(r).unwrap(), serde_json::json!({"prompt": "hi", "mode": "ask"}));
     }
 
@@ -831,5 +1016,59 @@ mod account_tests {
         let r = d.summary.route.unwrap();
         assert_eq!(r.observed_model.as_deref(), Some("claude-opus-5"));
         assert!(r.verified);
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    fn qs() -> Vec<PlanQuestion> {
+        serde_json::from_value(serde_json::json!([
+            {"id": "q1", "kind": "single", "prompt": "Which DB?", "options": [{"id": "a", "label": "Postgres"}, {"id": "b", "label": "SQLite"}]},
+            {"id": "q2", "kind": "multi", "prompt": "Targets?", "options": [{"id": "x", "label": "Linux"}, {"id": "y", "label": "macOS"}]},
+            {"id": "q3", "kind": "text", "prompt": "Deadline?"}
+        ]))
+        .unwrap()
+    }
+
+    /// Same encoding as ClaudexorKit's PlanAnswerComposer: labels, own words win.
+    #[test]
+    fn encodes_like_the_mac_app() {
+        let q = qs();
+        let picked = |id: &str| match id {
+            "q1" => vec!["b".to_string()],
+            "q2" => vec!["x".to_string(), "y".to_string()],
+            _ => vec![],
+        };
+        let text = |id: &str| if id == "q3" { " Friday ".to_string() } else { String::new() };
+        assert!(plan_answers_complete(&q, &picked, &text));
+        assert_eq!(
+            encode_plan_answers(&q, &picked, &text),
+            "Answers to your plan questions:\n- Which DB? → SQLite\n- Targets? → Linux, macOS\n- Deadline? → Friday"
+        );
+        let own = |id: &str| if id == "q1" { "DuckDB".to_string() } else { text(id) };
+        assert!(encode_plan_answers(&q, &picked, &own).contains("- Which DB? → DuckDB"), "own words replace chips");
+    }
+
+    #[test]
+    fn text_questions_need_words() {
+        let q = qs();
+        let picked = |id: &str| if id == "q3" { vec![] } else { vec!["a".to_string(), "x".to_string()] };
+        assert!(!plan_answers_complete(&q, &picked, &|_: &str| String::new()));
+        assert!(!plan_answers_complete(&[], &picked, &|_: &str| String::new()), "no questions is not an answer");
+    }
+
+    #[test]
+    fn turn_request_serializes_plan_fields() {
+        let mut r = TurnRequest::new("Implement this plan.", "agent");
+        r.plan_run_id = Some("run-1".into());
+        r.override_plan_readiness = Some(true);
+        r.attachments = vec![ResourceRef { resource_id: "res-1".into() }];
+        assert_eq!(
+            serde_json::to_value(r).unwrap(),
+            serde_json::json!({"prompt": "Implement this plan.", "mode": "agent", "planRunId": "run-1",
+                               "overridePlanReadiness": true, "attachments": [{"resourceId": "res-1"}]})
+        );
     }
 }

@@ -2,6 +2,7 @@
 //!
 //! `claudexor-linux`                → the app
 //! `claudexor-linux --send PROMPT`  → create an Ask thread, send one turn, follow it
+//! `claudexor-linux --upload FILE`  → push one file through the attachment pipeline
 //! `claudexor-linux --record DIR`   → dump live read-only API responses + one
 //!                                    run SSE log as fixtures (never the token)
 
@@ -161,6 +162,38 @@ impl eframe::App for App {
             }
         }
         self.state.pump();
+        // Desktop notifications only when the user is elsewhere (window unfocused).
+        let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+        for n in self.state.notices.drain(..) {
+            if !focused {
+                std::thread::spawn(move || {
+                    let _ = std::process::Command::new("notify-send")
+                        .args(["--app-name=Claudexor", "--icon=claudexor-linux", &n.title, &n.body])
+                        .status();
+                });
+            }
+        }
+        // Alt+Up / Alt+Down: previous / next thread in the sidebar order.
+        let step = ctx.input_mut(|i| {
+            if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowUp) {
+                -1
+            } else if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowDown) {
+                1
+            } else {
+                0
+            }
+        });
+        if step != 0 {
+            let live: Vec<String> = self.state.threads.iter().filter(|t| t.trashed_at.is_none()).map(|t| t.id.clone()).collect();
+            if !live.is_empty() {
+                let cur = self.state.selected.as_ref().and_then(|s| live.iter().position(|x| x == s));
+                let next = match cur {
+                    Some(i) => (i as i64 + step).clamp(0, live.len() as i64 - 1) as usize,
+                    None => 0,
+                };
+                self.state.select(Some(live[next].clone()));
+            }
+        }
         self.sync_theme(&ctx);
         let t = self.glass.theme;
         let full = ui.max_rect();
@@ -247,9 +280,11 @@ impl eframe::App for App {
                 self.accounts_anchor = side_out.accounts_anchor.left_top() + vec2(0.0, -SP);
                 self.state.refresh_quota(false);
             }
+            ui.label(RichText::new(format!("Claudexor for Linux {} · MIT", env!("CARGO_PKG_VERSION"))).size(T_SMALL).color(t.text3));
             if let Some(v) = &self.state.engine_version {
                 ui.label(RichText::new(format!("engine {v} · protocol {}", api::PROTOCOL_MAJOR)).size(T_SMALL).color(t.text3));
             }
+            ui.label(RichText::new("Ctrl+N new · Ctrl+K search · Alt+↑/↓ threads").size(T_SMALL).color(t.text3));
             if !self.glass.blur_available() {
                 ui.label(RichText::new("glass: solid fallback").size(T_SMALL).color(t.text3));
             }
@@ -288,6 +323,22 @@ impl eframe::App for App {
                 self.accounts_open = false;
             }
         }
+        // Hyperlinks (markdown answers): open through our worker-thread xdg-open
+        // instead of eframe's handler, which runs on the UI thread.
+        let urls: Vec<String> = ctx.output_mut(|o| {
+            let mut urls = vec![];
+            o.commands.retain(|c| match c {
+                egui::OutputCommand::OpenUrl(u) => {
+                    urls.push(u.url.clone());
+                    false
+                }
+                _ => true,
+            });
+            urls
+        });
+        for u in urls {
+            self.state.open_url(&u);
+        }
         let _ = Color32::TRANSPARENT;
     }
 
@@ -314,7 +365,9 @@ fn record(dir: &str) -> Result<(), String> {
         let p = dir.join(name);
         let mut v = v.clone();
         scrub_value(&mut v);
-        std::fs::write(&p, scrub(&serde_json::to_string_pretty(&v).unwrap())).map(|_| println!("  wrote {}", p.display())).map_err(|e| e.to_string())
+        std::fs::write(&p, scrub(&serde_json::to_string_pretty(&v).unwrap()))
+            .map(|_| println!("  wrote {}", p.display()))
+            .map_err(|e| e.to_string())
     };
     let (_, hs): (u16, Value) = c
         .post("handshake", serde_json::json!({"protocolMajor": api::PROTOCOL_MAJOR, "client": "claudexor-linux"}))
@@ -326,6 +379,7 @@ fn record(dir: &str) -> Result<(), String> {
         ("quota", "quota"),
         ("account-pools", "account-pools"),
         ("projects", "projects"),
+        ("credential-profiles", "credential-profiles"),
     ] {
         match c.get::<Value>(path) {
             Ok(v) => save(&format!("{name}.json"), &v)?,
@@ -383,7 +437,7 @@ fn send(prompt: &str) -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
     println!("thread {}", th.id);
-    let req = model::TurnRequest { prompt: prompt.into(), mode: "ask".into(), primary_harness: None, model: None, effort: None };
+    let req = model::TurnRequest::new(prompt, "ask");
     let started = c.send_turn(&th.id, &req).map_err(|e| e.to_string())?;
     println!("turn {:?} run {:?} job {:?} state {:?}", started.turn_id, started.run_id, started.job_id, started.state);
     let Some(sid) = started.stream_id() else { return Err("no run or job id to follow".into()) };
@@ -424,6 +478,24 @@ fn send(prompt: &str) -> Result<(), String> {
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--upload") {
+        // headless check of the attachment pipeline: create -> PUT bytes -> finalize
+        let path = args.get(i + 1).cloned().unwrap_or_default();
+        let r = api::Client::connect().map_err(|e| e.to_string()).and_then(|(c, _)| {
+            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+            let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let (kind, mime) = state::mime_for(&name);
+            c.upload(&name, kind, mime, &bytes).map_err(|e| e.to_string())
+        });
+        match r {
+            Ok(res) => println!("uploaded {} ({} bytes) -> resource {}", res.name, res.size_bytes, res.resource_id),
+            Err(e) => {
+                eprintln!("upload failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if let Some(i) = args.iter().position(|a| a == "--send") {
         if let Err(e) = send(args.get(i + 1).map(String::as_str).unwrap_or("Say hello in one word.")) {
             eprintln!("send failed: {e}");
@@ -465,13 +537,15 @@ fn scrub(text: &str) -> String {
     }
 }
 
-/// ...and the account's plan tier (a setup detail, not wire shape).
+/// ...and the account identity: email and plan tier (setup details, not wire shape).
 fn scrub_value(v: &mut serde_json::Value) {
     match v {
         serde_json::Value::Object(m) => {
             for (k, x) in m.iter_mut() {
-                if k == "plan_label" && x.is_string() {
+                if (k == "plan_label" || k == "plan") && x.is_string() {
                     *x = "plan".into();
+                } else if k == "email" && x.is_string() {
+                    *x = "user@example.com".into();
                 } else {
                     scrub_value(x);
                 }

@@ -69,80 +69,192 @@ pub fn show(ctx: &egui::Context, v: &mut View, s: &mut State, anchor_bottom_left
     keep
 }
 
+/// What the rows asked for; applied after drawing (rows only borrow State).
+enum AcctAct {
+    Login(String, Option<String>),
+    Enable(String, String, bool),
+    Remove(String, String),
+    Add(String, String),
+}
+
 fn body(ui: &mut Ui, t: &Theme, s: &mut State) {
-    let mut start: Option<String> = None;
-    body_rows(ui, t, s, &mut start);
-    if let Some(h) = start {
-        s.start_login(&h);
+    let mut act = None;
+    body_rows(ui, t, s, &mut act);
+    add_account_row(ui, t, s, &mut act);
+    match act {
+        Some(AcctAct::Login(h, p)) => s.start_login_for(&h, p),
+        Some(AcctAct::Enable(h, p, on)) => s.set_profile_enabled(&h, &p, on),
+        Some(AcctAct::Remove(h, p)) => s.delete_profile(&h, &p),
+        Some(AcctAct::Add(h, name)) => s.add_account(&h, &name),
+        None => {}
     }
 }
 
-fn body_rows(ui: &mut Ui, t: &Theme, s: &State, start: &mut Option<String>) {
-    let Some(q) = &s.quota else {
-        ui.label(dim(t, if s.client.is_some() { "Loading…" } else { "Engine offline" }));
-        return;
-    };
-    let mut harnesses: BTreeSet<String> = q.snapshots.iter().map(|x| x.subject.harness.clone()).collect();
-    harnesses.extend(q.absences.iter().map(|x| x.subject.harness.clone()));
+fn in_app_login(s: &State, harness: &str) -> bool {
+    s.harnesses.iter().find(|x| x.id == harness).and_then(|x| x.setup_login.as_ref()).is_some_and(|l| l.mode == "in_app")
+}
+
+/// One section per harness: its accounts (credential profiles) with readiness,
+/// Enabled toggle, Log in / Remove, and the account's own quota windows.
+fn body_rows(ui: &mut Ui, t: &Theme, s: &State, act: &mut Option<AcctAct>) {
+    let profiles: Vec<&crate::model::ProfileRow> = s.profiles.as_ref().map(|p| p.profiles.iter().collect()).unwrap_or_default();
+    let quota = s.quota.as_ref();
+    let mut harnesses: BTreeSet<String> = profiles.iter().map(|r| r.profile.harness_id.clone()).collect();
+    if let Some(q) = quota {
+        harnesses.extend(q.snapshots.iter().map(|x| x.subject.harness.clone()));
+        harnesses.extend(q.absences.iter().map(|x| x.subject.harness.clone()));
+    }
     harnesses.extend(s.pools.iter().map(|p| p.harness_id.clone()));
     if harnesses.is_empty() {
-        ui.label(dim(t, "No accounts reported. Sign in with `claudexor auth login` or `claudexor profiles`."));
+        ui.label(dim(t, if s.client.is_some() { "Loading…" } else { "Engine offline" }));
         return;
     }
+    let busy = s.login.as_ref().is_some_and(|l| l.active());
     for h in harnesses {
+        let rows: Vec<_> = profiles.iter().filter(|r| r.profile.harness_id == h).collect();
+        let installed = s.harnesses.iter().find(|x| x.id == h).is_some_and(|x| x.setup_login.is_some() || x.status == "ok");
         ui.horizontal(|ui| {
             ui.label(RichText::new(&h).color(t.harness(&h)).family(semibold()).size(T_BODY));
             if let Some(p) = s.pools.iter().find(|p| p.harness_id == h) {
-                ui.label(dim(t, format!("next up: {}", p.next_up.describe())));
+                let r = ui.label(dim(t, format!("next up: {}", p.next_up.describe())));
+                if let Some(why) = &p.next_up.reason {
+                    r.on_hover_text(why);
+                }
             }
-            // In-app login only where the engine advertises it and the harness is not ready yet.
-            let hs = s.harnesses.iter().find(|x| x.id == h);
-            let in_app = hs.and_then(|x| x.setup_login.as_ref()).is_some_and(|l| l.mode == "in_app");
-            let ready = hs.is_some_and(|x| x.status == "ok");
-            let busy = s.login.as_ref().is_some_and(|l| l.active());
-            if in_app && !ready {
+            // A harness with no account row yet: its bootstrap login.
+            if rows.is_empty() && in_app_login(s, &h) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let b =
                         egui::Button::new(RichText::new("Log in").size(T_SMALL).color(t.on_accent)).fill(t.accent_solid).corner_radius(8);
                     if ui.add_enabled(!busy && s.client.is_some(), b).on_disabled_hover_text("A sign-in is already in progress").clicked() {
-                        *start = Some(h.clone());
+                        *act = Some(AcctAct::Login(h.clone(), None));
                     }
                 });
             }
         });
-        for sn in q.accounts().into_iter().filter(|x| x.subject.harness == h) {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(subject_label(&sn.subject)).color(t.text).size(T_SMALL + 1.0));
-                if let Some(f) = &sn.freshness {
-                    let c = if f == "fresh" { t.success } else { t.blocked };
-                    ui.label(RichText::new(f).color(c).size(T_SMALL - 1.0));
+        if !installed && rows.is_empty() {
+            if let Some(hs) = s.harnesses.iter().find(|x| x.id == h) {
+                if let Some(r) = hs.reasons.first() {
+                    ui.add(egui::Label::new(dim(t, r)).wrap());
                 }
-                if let Some(a) = &sn.availability {
-                    if a.state != "available" {
-                        let when = a.resets_at.as_deref().map(until).unwrap_or_default();
-                        ui.label(RichText::new(format!("{} {when}", a.state)).color(t.failed).size(T_SMALL - 1.0));
-                    }
-                }
-            });
-            for c in &sn.constraints {
-                constraint(ui, t, c);
             }
-            if let Some(at) = &sn.observed_at {
-                ui.label(dim(t, format!("observed {} · {}", super::theme::ago(at), sn.source.as_deref().unwrap_or("?"))));
-            }
-            ui.add_space(SP);
         }
-        for a in q.account_absences().into_iter().filter(|x| x.subject.harness == h) {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(subject_label(&a.subject)).color(t.text2).size(T_SMALL + 1.0));
-                ui.label(RichText::new(a.reason.replace('_', " ")).color(t.blocked).size(T_SMALL - 1.0));
-            });
-            if let Some(d) = &a.detail {
-                ui.add(egui::Label::new(dim(t, d)).wrap());
+        for r in &rows {
+            account_row(ui, t, s, r, busy, act);
+        }
+        // Quota subjects that belong to no listed account (e.g. before the registry loads).
+        if let Some(q) = quota {
+            let listed: Vec<&str> = rows.iter().map(|r| r.profile.profile_id.as_str()).collect();
+            for sn in q.accounts().into_iter().filter(|x| x.subject.harness == h && !listed.contains(&x.subject.account_key().2.as_str())) {
+                ui.label(RichText::new(subject_label(&sn.subject)).color(t.text2).size(T_SMALL + 1.0));
+                for c in &sn.constraints {
+                    constraint(ui, t, c);
+                }
             }
         }
         ui.add_space(2.0 * SP);
     }
+}
+
+fn account_row(ui: &mut Ui, t: &Theme, s: &State, r: &crate::model::ProfileRow, busy: bool, act: &mut Option<AcctAct>) {
+    let (h, id) = (r.profile.harness_id.clone(), r.profile.profile_id.clone());
+    let ready = r.ready();
+    ui.horizontal(|ui| {
+        let dot = if !r.profile.enabled {
+            t.text3
+        } else if ready {
+            t.success
+        } else {
+            t.blocked
+        };
+        let (rect, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
+        ui.painter().circle_filled(rect.center(), 4.0, dot);
+        ui.add(egui::Label::new(RichText::new(r.label()).color(t.text).size(T_SMALL + 1.0)).truncate()).on_hover_text(format!(
+            "{id}{}",
+            r.status.as_ref().and_then(|x| x.detail.as_deref()).map(|d| format!("\n{d}")).unwrap_or_default()
+        ));
+        if let Some(plan) = r.identity.as_ref().and_then(|i| i.plan.as_deref()) {
+            ui.label(dim(t, plan.replace('_', " ")));
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Remove: two clicks (arm, confirm) — deletes the binding + Claudexor-owned state.
+            let arm = Id::new(("remove-account", &id));
+            let armed: bool = ui.ctx().data(|d| d.get_temp(arm)).unwrap_or(false);
+            let label = if armed { RichText::new("Confirm remove").color(t.failed) } else { RichText::new("Remove").color(t.text3) };
+            if ui.add(egui::Button::new(label.size(T_SMALL - 1.0)).frame(false)).on_hover_text("Delete this account binding").clicked() {
+                if armed {
+                    ui.ctx().data_mut(|d| d.remove::<bool>(arm));
+                    *act = Some(AcctAct::Remove(h.clone(), id.clone()));
+                } else {
+                    ui.ctx().data_mut(|d| d.insert_temp(arm, true));
+                }
+            }
+            if !ready && r.profile.enabled && in_app_login(s, &h) {
+                let b = egui::Button::new(RichText::new("Log in").size(T_SMALL).color(t.on_accent)).fill(t.accent_solid).corner_radius(8);
+                if ui.add_enabled(!busy && s.client.is_some(), b).on_disabled_hover_text("A sign-in is already in progress").clicked() {
+                    *act = Some(AcctAct::Login(h.clone(), Some(id.clone())));
+                }
+            }
+            let mut on = r.profile.enabled;
+            if ui.checkbox(&mut on, "").on_hover_text("Enabled: include this account in the routing pool").changed() {
+                *act = Some(AcctAct::Enable(h.clone(), id.clone(), on));
+            }
+        });
+    });
+    if let Some(q) = &s.quota {
+        for sn in q.accounts().into_iter().filter(|x| x.subject.harness == h && x.subject.account_key().2 == id) {
+            for c in &sn.constraints {
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    constraint(ui, t, c);
+                });
+            }
+            if let Some(a) = &sn.availability {
+                if a.state != "available" {
+                    ui.label(
+                        RichText::new(format!("   {} {}", a.state, a.resets_at.as_deref().map(until).unwrap_or_default()))
+                            .color(t.failed)
+                            .size(T_SMALL - 1.0),
+                    );
+                }
+            }
+        }
+        for a in q.account_absences().into_iter().filter(|x| x.subject.harness == h && x.subject.account_key().2 == id) {
+            ui.label(RichText::new(format!("   {}", a.reason.replace('_', " "))).color(t.blocked).size(T_SMALL - 1.0));
+        }
+    }
+}
+
+/// "Add account": a named account row for a harness, then its login at once.
+fn add_account_row(ui: &mut Ui, t: &Theme, s: &State, act: &mut Option<AcctAct>) {
+    let hs: Vec<String> =
+        s.harnesses.iter().filter(|x| x.setup_login.as_ref().is_some_and(|l| l.mode == "in_app")).map(|x| x.id.clone()).collect();
+    if hs.is_empty() || s.client.is_none() {
+        return;
+    }
+    let key = Id::new("add-account");
+    let (mut harness, mut name): (String, String) = ui.ctx().data(|d| d.get_temp(key)).unwrap_or_else(|| (hs[0].clone(), String::new()));
+    ui.separator();
+    ui.label(RichText::new("Add another account").color(t.text2).size(T_SMALL));
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("add-account-harness").selected_text(&harness).width(80.0).show_ui(ui, |ui| {
+            for h in &hs {
+                ui.selectable_value(&mut harness, h.clone(), h);
+            }
+        });
+        ui.add(egui::TextEdit::singleline(&mut name).hint_text("name, e.g. work").desired_width(120.0));
+        let busy = s.login.as_ref().is_some_and(|l| l.active());
+        let b = egui::Button::new(RichText::new("Add & log in").size(T_SMALL).color(t.on_accent)).fill(t.accent_solid).corner_radius(8);
+        if ui
+            .add_enabled(!busy && !name.trim().is_empty(), b)
+            .on_disabled_hover_text("Name the account (and finish any sign-in in progress)")
+            .clicked()
+        {
+            *act = Some(AcctAct::Add(harness.clone(), name.clone()));
+            name.clear();
+        }
+    });
+    ui.ctx().data_mut(|d| d.insert_temp(key, (harness, name)));
 }
 
 /// The in-app sign-in: link (+ code) from the job snapshot, a paste field for

@@ -361,9 +361,85 @@ impl Client {
         self.get("account-pools")
     }
 
-    /// Start (or rejoin: a duplicate create returns the active job) a native login.
-    pub fn start_login(&self, harness: &str) -> Result<SetupJob, ApiError> {
-        self.post("setup/jobs", json!({"harness": harness, "action": "login", "authRequest": "subscription"})).map(|(_, j)| j)
+    /// Start (or rejoin: a duplicate create returns the active job) a native
+    /// login — for the harness's bootstrap account, or one exact profile.
+    pub fn start_login(&self, harness: &str, profile: Option<&str>) -> Result<SetupJob, ApiError> {
+        let mut body = json!({"harness": harness, "action": "login", "authRequest": "subscription"});
+        if let Some(p) = profile {
+            body["profileId"] = json!(p);
+        }
+        self.post("setup/jobs", body).map(|(_, j)| j)
+    }
+
+    // ---- threads ---------------------------------------------------------------------
+
+    fn patch<T: DeserializeOwned>(&self, path: &str, body: impl Serialize) -> Result<T, ApiError> {
+        let r = self
+            .agent
+            .patch(self.url(path))
+            .header("Authorization", &self.bearer)
+            .header("X-Claudexor-Protocol-Major", "3")
+            .send_json(body);
+        Self::finish(r).map(|(_, v)| v)
+    }
+
+    /// Rename (`{"title"}`) or archive/reopen (`{"state": "closed"|"active"}`).
+    pub fn update_thread(&self, id: &str, body: Value) -> Result<Thread, ApiError> {
+        self.patch(&format!("threads/{}", seg(id)), body)
+    }
+
+    /// `trash` | `restore` | `purge` (purge only from trash; permanent).
+    pub fn thread_action(&self, id: &str, action: &str) -> Result<Thread, ApiError> {
+        self.post_empty(&format!("threads/{}/{}", seg(id), seg(action))).map(|(_, t)| t)
+    }
+
+    // ---- accounts (credential profiles) ------------------------------------------------
+
+    pub fn profiles(&self) -> Result<Profiles, ApiError> {
+        self.get("credential-profiles")
+    }
+
+    pub fn create_profile(&self, harness: &str, profile_id: &str, display_name: Option<&str>) -> Result<Value, ApiError> {
+        let mut body = json!({"harnessId": harness, "profileId": profile_id});
+        if let Some(n) = display_name {
+            body["displayName"] = json!(n);
+        }
+        self.post("credential-profiles", body).map(|(_, v)| v)
+    }
+
+    pub fn set_profile_enabled(&self, harness: &str, profile_id: &str, enabled: bool) -> Result<Value, ApiError> {
+        self.patch(&format!("credential-profiles/{}/{}", seg(harness), seg(profile_id)), json!({ "enabled": enabled }))
+    }
+
+    pub fn delete_profile(&self, harness: &str, profile_id: &str) -> Result<Value, ApiError> {
+        let r = self
+            .agent
+            .delete(self.url(&format!("credential-profiles/{}/{}", seg(harness), seg(profile_id))))
+            .header("Authorization", &self.bearer)
+            .header("X-Claudexor-Protocol-Major", "3")
+            .header("Idempotency-Key", idempotency_key())
+            .call();
+        Self::finish(r).map(|(_, v)| v)
+    }
+
+    // ---- attachments -----------------------------------------------------------------
+
+    /// The v2 resource pipeline: create → one PUT of the complete bytes →
+    /// finalize. Returns the immutable resource a turn may reference.
+    pub fn upload(&self, name: &str, kind: &str, mime: &str, bytes: &[u8]) -> Result<Resource, ApiError> {
+        let (_, up): (u16, UploadStatus) =
+            self.post("uploads", json!({"kind": kind, "mime": mime, "name": name, "sizeBytes": bytes.len()}))?;
+        let r = self
+            .agent
+            .put(self.url(&format!("uploads/{}/bytes", seg(&up.upload_id))))
+            .header("Authorization", &self.bearer)
+            .header("X-Claudexor-Protocol-Major", "3")
+            .header("Content-Type", "application/octet-stream")
+            .send(bytes);
+        Self::finish::<Value>(r)?;
+        // ponytail: no client-side sha256 (would add a dependency); the daemon hashes
+        // and revalidates the bytes at finalize and again at enqueue.
+        self.post(&format!("uploads/{}/finalize", seg(&up.upload_id)), json!({})).map(|(_, r)| r)
     }
 
     /// Job + transient sign-in disclosure (URL / one-time code).
