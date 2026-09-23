@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Claudexor
+GenericName=AI coding control plane
+Comment=Native Linux client for the Claudexor daemon
+Exec=claudexor-linux
+Icon=claudexor-linux
+Terminal=false
+Categories=Development;IDE;
+Keywords=claude;codex;agent;ai;
+StartupWMClass=claudexor-linux

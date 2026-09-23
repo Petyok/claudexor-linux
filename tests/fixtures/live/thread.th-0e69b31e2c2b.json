@@ -1,0 +1,97 @@
+{
+  "sessions": [
+    {
+      "harnessId": "claude",
+      "id": "se-2e4b8fae0765",
+      "nativeSessionId": "37b7ce8d-593b-4390-968b-25dda30275dc",
+      "observedModel": "claude-opus-5",
+      "profileId": "claude-default",
+      "state": "live",
+      "threadId": "th-0e69b31e2c2b"
+    }
+  ],
+  "thread": {
+    "access": null,
+    "authPreference": "auto",
+    "createdAt": "2026-09-23T12:40:08.860Z",
+    "credentialProfileId": null,
+    "eligibleHarnesses": [],
+    "headRunId": "run-7ef7c842eb39",
+    "id": "th-0e69b31e2c2b",
+    "mode": "ask",
+    "needsHuman": false,
+    "primaryHarness": "claude",
+    "purgeAfter": null,
+    "repoRoot": null,
+    "runIds": [
+      "run-7ef7c842eb39"
+    ],
+    "state": "active",
+    "title": "Reply with the single word: pong",
+    "trashedAt": null,
+    "updatedAt": "2026-09-23T12:40:17.255Z",
+    "workspaceMode": "in_place"
+  },
+  "turns": [
+    {
+      "answersPlanRunId": null,
+      "continuity": {
+        "kind": "fresh",
+        "laneSwitchedFrom": null,
+        "packetTurns": 0,
+        "summarized": false
+      },
+      "createdAt": "2026-09-23T12:40:08.969Z",
+      "enqueueError": null,
+      "id": "tn-bbbe677b65b3",
+      "kind": "initial",
+      "parentRunId": null,
+      "planHash": null,
+      "planReadinessOverridden": false,
+      "planRunId": null,
+      "prompt": "Reply with the single word: pong",
+      "run": {
+        "delegatedChildRunIds": [],
+        "delegation": {
+          "effective": false,
+          "reason": "not_requested",
+          "remediation": null,
+          "requested": false,
+          "used": false
+        },
+        "finishedAt": "2026-09-23T12:40:20.408Z",
+        "mode": "ask",
+        "outcomeFacts": {
+          "checks": "not_configured",
+          "lifecycle": "succeeded",
+          "noChanges": false,
+          "reason": null,
+          "review": "not_run",
+          "review_requested": false,
+          "work_state": {
+            "source": "absent",
+            "state": "unverified"
+          }
+        },
+        "outputReadyState": "ready",
+        "result": {
+          "adopted": null,
+          "applyState": "not_applied",
+          "blockers": 0,
+          "diffStat": null,
+          "kind": "none",
+          "postTurnSha": null,
+          "preTurnSha": null,
+          "revertAnchorId": null,
+          "revertable": false
+        },
+        "spendUsd": 0,
+        "state": "succeeded",
+        "strategy": null,
+        "waitingOnUser": false
+      },
+      "runId": "run-7ef7c842eb39",
+      "threadId": "th-0e69b31e2c2b"
+    }
+  ]
+}

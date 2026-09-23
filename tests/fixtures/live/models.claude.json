@@ -1,0 +1,103 @@
+{
+  "harnessId": "claude",
+  "models": [
+    {
+      "context_window": null,
+      "id": "sonnet",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "opus",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "haiku",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "fable",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "best",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "claude-fable-5-1",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "claude-fable-5",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "claude-sonnet-5",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "claude-opus-5",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "claude-opus-4-8",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "claude-opus-4-7",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "claude-opus-4-6",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "claude-opus-4-5",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "claude-sonnet-4-6",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "claude-sonnet-4-5",
+      "label": null,
+      "routes": null
+    },
+    {
+      "context_window": null,
+      "id": "claude-haiku-4-5",
+      "label": null,
+      "routes": null
+    }
+  ],
+  "source": "manifest",
+  "verifiedAgainst": "2.1.261"
+}

@@ -1,0 +1,116 @@
+{
+  "absences": [
+    {
+      "detail": "no auth.json in /home/user/.claudexor/v3/native/codex; run `claudexor auth login codex`",
+      "observed_at": "2026-09-23T13:14:00.557Z",
+      "reason": "not_logged_in",
+      "subject": {
+        "credential_route": "vendor_native",
+        "harness": "codex",
+        "plan_label": null,
+        "subject_id": null
+      }
+    }
+  ],
+  "refreshed_at": null,
+  "snapshots": [
+    {
+      "availability": {
+        "blocking_constraints": [],
+        "model_scoped_exhaustions": [],
+        "resets_at": null,
+        "state": "available"
+      },
+      "constraints": [
+        {
+          "cooldown_until": null,
+          "id": "five_hour",
+          "label": "5 hour",
+          "resets_at": "2026-09-23T13:50:00.260533+00:00",
+          "used_ratio": 0.35,
+          "window_seconds": 18000
+        },
+        {
+          "cooldown_until": null,
+          "id": "seven_day",
+          "label": "7 day",
+          "resets_at": "2026-09-27T11:00:00.260552+00:00",
+          "used_ratio": 0.41,
+          "window_seconds": 604800
+        },
+        {
+          "applies_to_models": [
+            "fable",
+            "claude-fable-5-1",
+            "claude-fable-5",
+            "best"
+          ],
+          "cooldown_until": null,
+          "id": "weekly_scoped:Fable",
+          "label": "7 day (Fable)",
+          "resets_at": "2026-09-27T11:00:00.260727+00:00",
+          "used_ratio": 0.07,
+          "window_seconds": 604800
+        }
+      ],
+      "freshness": "fresh",
+      "observed_at": "2026-09-23T13:13:01.652Z",
+      "source": "claude_oauth_usage",
+      "subject": {
+        "credential_route": "vendor_native",
+        "harness": "claude",
+        "plan_label": "plan",
+        "subject_id": null
+      }
+    },
+    {
+      "availability": {
+        "blocking_constraints": [],
+        "model_scoped_exhaustions": [],
+        "resets_at": null,
+        "state": "available"
+      },
+      "constraints": [
+        {
+          "cooldown_until": null,
+          "id": "five_hour",
+          "label": "5 hour",
+          "resets_at": "2026-09-23T13:49:59.949377+00:00",
+          "used_ratio": 0.35,
+          "window_seconds": 18000
+        },
+        {
+          "cooldown_until": null,
+          "id": "seven_day",
+          "label": "7 day",
+          "resets_at": "2026-09-27T10:59:59.949400+00:00",
+          "used_ratio": 0.41,
+          "window_seconds": 604800
+        },
+        {
+          "applies_to_models": [
+            "fable",
+            "claude-fable-5-1",
+            "claude-fable-5",
+            "best"
+          ],
+          "cooldown_until": null,
+          "id": "weekly_scoped:Fable",
+          "label": "7 day (Fable)",
+          "resets_at": "2026-09-27T10:59:59.949609+00:00",
+          "used_ratio": 0.07,
+          "window_seconds": 604800
+        }
+      ],
+      "freshness": "fresh",
+      "observed_at": "2026-09-23T13:13:02.367Z",
+      "source": "claude_oauth_usage",
+      "subject": {
+        "credential_route": "vendor_native",
+        "harness": "claude",
+        "plan_label": "plan",
+        "subject_id": "claude-default"
+      }
+    }
+  ]
+}

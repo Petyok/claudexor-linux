@@ -1,0 +1,50 @@
+{
+  "problems": [],
+  "threads": [
+    {
+      "access": null,
+      "authPreference": "auto",
+      "createdAt": "2026-09-23T12:40:08.860Z",
+      "credentialProfileId": null,
+      "eligibleHarnesses": [],
+      "headRunId": "run-7ef7c842eb39",
+      "id": "th-0e69b31e2c2b",
+      "mode": "ask",
+      "needsHuman": false,
+      "primaryHarness": "claude",
+      "purgeAfter": null,
+      "repoRoot": null,
+      "runIds": [
+        "run-7ef7c842eb39"
+      ],
+      "state": "active",
+      "title": "Reply with the single word: pong",
+      "trashedAt": null,
+      "updatedAt": "2026-09-23T12:40:17.255Z",
+      "workspaceMode": "in_place"
+    },
+    {
+      "access": null,
+      "authPreference": "auto",
+      "createdAt": "2026-09-23T11:17:39.526Z",
+      "credentialProfileId": null,
+      "eligibleHarnesses": [],
+      "headRunId": "run-be5936d0f6fb",
+      "id": "th-fceb460e2489",
+      "mode": "ask",
+      "needsHuman": false,
+      "primaryHarness": null,
+      "purgeAfter": null,
+      "repoRoot": null,
+      "runIds": [
+        "run-3a038adcb248",
+        "run-be5936d0f6fb"
+      ],
+      "state": "active",
+      "title": "Reply with the single word: pong",
+      "trashedAt": null,
+      "updatedAt": "2026-09-23T11:33:32.386Z",
+      "workspaceMode": "in_place"
+    }
+  ]
+}

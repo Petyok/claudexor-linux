@@ -1,0 +1,743 @@
+{
+  "git": {
+    "detail": null,
+    "remediation": null,
+    "status": "available",
+    "version": "git version 2.55.0"
+  },
+  "harnesses": [
+    {
+      "authSources": [],
+      "checks": [
+        {
+          "detail": "codex not found on PATH — /usr/bin/codex (symlink to ../lib/node_modules/@openai/codex/bin/codex.js) exists but its target is missing — reinstall codex or point the binary override at a working install",
+          "id": "installed",
+          "status": "fail"
+        }
+      ],
+      "configuredModel": null,
+      "configuredModelCheck": null,
+      "delegation": {
+        "available": false,
+        "reason": "manifest_unsupported",
+        "remediation": "Choose a harness that supports Claudexor MCP injection.",
+        "requiresFullAccess": false
+      },
+      "disabledIntents": [],
+      "enabledIntents": [],
+      "id": "codex",
+      "manifest": null,
+      "readiness": [
+        {
+          "detail": "codex not found on PATH — /usr/bin/codex (symlink to ../lib/node_modules/@openai/codex/bin/codex.js) exists but its target is missing — reinstall codex or point the binary override at a working install",
+          "id": "installed",
+          "kind": "binary",
+          "status": "fail",
+          "title": "Installed"
+        }
+      ],
+      "reasons": [
+        "discover failed: codex CLI not found on PATH (set CLAUDEXOR_CODEX_BIN to override) — /usr/bin/codex (symlink to ../lib/node_modules/@openai/codex/bin/codex.js) exists but its target is missing — reinstall codex or point the binary override at a working install",
+        "codex CLI not found (install Codex or set CLAUDEXOR_CODEX_BIN)",
+        "/usr/bin/codex (symlink to ../lib/node_modules/@openai/codex/bin/codex.js) exists but its target is missing — reinstall codex or point the binary override at a working install"
+      ],
+      "routableIntents": [],
+      "setupLogin": null,
+      "status": "unavailable"
+    },
+    {
+      "authSources": [
+        {
+          "availability": "unknown",
+          "detail": "agy binary not installed",
+          "source": "native_session",
+          "verification": "not_run"
+        }
+      ],
+      "checks": [
+        {
+          "detail": "agy not found",
+          "id": "installed",
+          "status": "fail"
+        }
+      ],
+      "configuredModel": null,
+      "configuredModelCheck": null,
+      "delegation": {
+        "available": false,
+        "reason": "manifest_unsupported",
+        "remediation": "Choose a harness that supports Claudexor MCP injection.",
+        "requiresFullAccess": false
+      },
+      "disabledIntents": [
+        "explain",
+        "plan",
+        "spec",
+        "implement",
+        "repair",
+        "create_from_scratch",
+        "review",
+        "verify",
+        "synthesize",
+        "audit"
+      ],
+      "enabledIntents": [],
+      "id": "agy",
+      "manifest": null,
+      "readiness": [
+        {
+          "detail": "agy not found",
+          "id": "installed",
+          "kind": "binary",
+          "status": "fail",
+          "title": "Installed"
+        },
+        {
+          "detail": "agy binary not installed",
+          "id": "auth_source:native_session",
+          "kind": "auth",
+          "status": "skip",
+          "title": "Native session"
+        }
+      ],
+      "reasons": [
+        "discover failed: agy not found on PATH (install Antigravity CLI or set CLAUDEXOR_AGY_BIN)",
+        "agy not found (install Antigravity CLI or set CLAUDEXOR_AGY_BIN)"
+      ],
+      "routableIntents": [],
+      "setupLogin": null,
+      "status": "unavailable"
+    },
+    {
+      "authSources": [
+        {
+          "availability": "available",
+          "detail": "vendor status confirmed authMethod=claude.ai in the exact run environment",
+          "source": "native_session",
+          "verification": "passed"
+        },
+        {
+          "availability": "unavailable",
+          "detail": "no Claude setup-token available",
+          "source": "oauth_token_env",
+          "verification": "not_run"
+        },
+        {
+          "availability": "unavailable",
+          "detail": "no API key fallback available",
+          "source": "api_key_env",
+          "verification": "not_run"
+        }
+      ],
+      "checks": [
+        {
+          "detail": "2.1.280 (Claude Code) at /home/user/.nvm/versions/node/v24.20.0/bin/claude",
+          "id": "installed",
+          "status": "pass"
+        },
+        {
+          "detail": "installed Claude CLI exposes the complete restrictive readonly flag set",
+          "id": "readonly_enforcement",
+          "status": "pass"
+        },
+        {
+          "detail": "vendor status confirmed authMethod=claude.ai in the exact run environment",
+          "id": "native_session",
+          "status": "pass"
+        },
+        {
+          "detail": "no Claude setup-token available",
+          "id": "oauth_setup_token",
+          "status": "skip"
+        },
+        {
+          "detail": "no anthropic key fallback",
+          "id": "stored_key",
+          "status": "fail"
+        },
+        {
+          "detail": "no API key fallback available",
+          "id": "isolated_api_smoke",
+          "status": "skip"
+        }
+      ],
+      "configuredModel": null,
+      "configuredModelCheck": null,
+      "delegation": {
+        "available": true,
+        "reason": "ready",
+        "remediation": null,
+        "requiresFullAccess": false
+      },
+      "disabledIntents": [],
+      "enabledIntents": [
+        "plan",
+        "spec",
+        "implement",
+        "repair",
+        "create_from_scratch",
+        "review",
+        "verify",
+        "synthesize",
+        "explain",
+        "audit"
+      ],
+      "id": "claude",
+      "manifest": {
+        "access_profiles_supported": [
+          "readonly",
+          "workspace_write",
+          "full",
+          "inherit_native"
+        ],
+        "adapter_version": "3.13.0",
+        "auth_modes": [
+          "local_session"
+        ],
+        "capabilities": {
+          "browser_tool": true,
+          "create_from_scratch": true,
+          "effort_levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "effort_levels_verified_against": "2.1.280 (Claude Code)",
+          "implement": true,
+          "implementation_transport": "workspace",
+          "interactive": true,
+          "json_schema_output": true,
+          "known_models": [
+            "sonnet",
+            "opus",
+            "haiku",
+            "fable",
+            "best",
+            "claude-fable-5-1",
+            "claude-fable-5",
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-opus-4-5",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5"
+          ],
+          "known_models_verified_against": "2.1.261",
+          "max_turns": true,
+          "model_effort_levels": {},
+          "plan": true,
+          "processing_preferences": [
+            "standard",
+            "fast",
+            "economy"
+          ],
+          "read_files": true,
+          "review": true,
+          "structured_output_channel": "side_tool",
+          "synthesize": true,
+          "tool_lists": true,
+          "verify": true,
+          "web_policy": "tools",
+          "work_report_transport": "constrained"
+        },
+        "capability_profile": {
+          "access_control": {
+            "readonly_mechanism": "tool_allowlist",
+            "write_mechanism": "tool_policy"
+          },
+          "attachment_inputs": [
+            {
+              "kind": "image",
+              "max_bytes": 5242880,
+              "max_count": 20,
+              "mime_types": [
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/webp"
+              ],
+              "transport": "base64_stream"
+            },
+            {
+              "kind": "file",
+              "max_bytes": 1048576,
+              "max_count": 10,
+              "mime_types": [
+                "text/plain",
+                "text/markdown",
+                "application/json"
+              ],
+              "transport": "text_inline"
+            }
+          ],
+          "auth": {
+            "credential_transports": [
+              {
+                "kind": "config_file",
+                "relocatable_by": [
+                  "CONFIG_DIR"
+                ],
+                "source": "native_session"
+              },
+              {
+                "kind": "os_keychain",
+                "relocatable_by": [
+                  "HOME"
+                ],
+                "source": "native_session"
+              },
+              {
+                "kind": "oauth_token_env",
+                "relocatable_by": [
+                  "ENV"
+                ],
+                "source": "oauth_token_env"
+              },
+              {
+                "kind": "env_var",
+                "relocatable_by": [
+                  "ENV"
+                ],
+                "source": "api_key_env"
+              }
+            ],
+            "managed_login": {
+              "stdin": "pipe"
+            },
+            "preferred_source": "native_session",
+            "supported_sources": [
+              "native_session",
+              "oauth_token_env",
+              "api_key_env"
+            ]
+          },
+          "isolation": {
+            "supported_containment": [
+              "scoped_home_keychain_bridge",
+              "env_or_file_injection"
+            ]
+          },
+          "mcp_injection": true,
+          "mcp_injection_requires_full_access": false
+        },
+        "display_name": "Claude Code",
+        "id": "claude",
+        "kind": "local_cli",
+        "provider_family": "anthropic",
+        "version": "2.1.280 (Claude Code)"
+      },
+      "readiness": [
+        {
+          "detail": "2.1.280 (Claude Code) at /home/user/.nvm/versions/node/v24.20.0/bin/claude",
+          "id": "installed",
+          "kind": "binary",
+          "status": "pass",
+          "title": "Installed"
+        },
+        {
+          "detail": "installed Claude CLI exposes the complete restrictive readonly flag set",
+          "id": "readonly_enforcement",
+          "kind": "probe",
+          "status": "pass",
+          "title": "Readonly enforcement"
+        },
+        {
+          "detail": "vendor status confirmed authMethod=claude.ai in the exact run environment",
+          "id": "native_session",
+          "kind": "probe",
+          "status": "pass",
+          "title": "Native session"
+        },
+        {
+          "detail": "no Claude setup-token available",
+          "id": "oauth_setup_token",
+          "kind": "probe",
+          "status": "skip",
+          "title": "Oauth setup token"
+        },
+        {
+          "detail": "no anthropic key fallback",
+          "id": "stored_key",
+          "kind": "probe",
+          "status": "fail",
+          "title": "Stored key"
+        },
+        {
+          "detail": "no API key fallback available",
+          "id": "isolated_api_smoke",
+          "kind": "probe",
+          "status": "skip",
+          "title": "Isolated api smoke"
+        },
+        {
+          "detail": "vendor status confirmed authMethod=claude.ai in the exact run environment",
+          "id": "auth_source:native_session",
+          "kind": "auth",
+          "status": "pass",
+          "title": "Native session"
+        },
+        {
+          "detail": "no Claude setup-token available",
+          "id": "auth_source:oauth_token_env",
+          "kind": "auth",
+          "status": "skip",
+          "title": "Setup token"
+        },
+        {
+          "detail": "no API key fallback available",
+          "id": "auth_source:api_key_env",
+          "kind": "auth",
+          "status": "skip",
+          "title": "API key"
+        }
+      ],
+      "reasons": [],
+      "routableIntents": [
+        "plan",
+        "spec",
+        "implement",
+        "repair",
+        "create_from_scratch",
+        "review",
+        "verify",
+        "synthesize",
+        "explain",
+        "audit"
+      ],
+      "setupLogin": {
+        "mode": "in_app"
+      },
+      "status": "ok"
+    },
+    {
+      "authSources": [],
+      "checks": [
+        {
+          "detail": "cursor-agent not found",
+          "id": "installed",
+          "status": "fail"
+        }
+      ],
+      "configuredModel": null,
+      "configuredModelCheck": null,
+      "delegation": {
+        "available": false,
+        "reason": "manifest_unsupported",
+        "remediation": "Choose a harness that supports Claudexor MCP injection.",
+        "requiresFullAccess": false
+      },
+      "disabledIntents": [],
+      "enabledIntents": [],
+      "id": "cursor",
+      "manifest": null,
+      "readiness": [
+        {
+          "detail": "cursor-agent not found",
+          "id": "installed",
+          "kind": "binary",
+          "status": "fail",
+          "title": "Installed"
+        }
+      ],
+      "reasons": [
+        "discover failed: cursor-agent not found on PATH (set CLAUDEXOR_CURSOR_BIN)",
+        "cursor-agent not found (install Cursor CLI or set CLAUDEXOR_CURSOR_BIN)"
+      ],
+      "routableIntents": [],
+      "setupLogin": null,
+      "status": "unavailable"
+    },
+    {
+      "authSources": [
+        {
+          "availability": "unavailable",
+          "detail": "no provider API key is configured",
+          "source": "api_key_env",
+          "verification": "not_run"
+        }
+      ],
+      "checks": [
+        {
+          "detail": "1.18.21",
+          "id": "installed",
+          "status": "pass"
+        },
+        {
+          "id": "provider_auth",
+          "status": "fail"
+        },
+        {
+          "detail": "no isolated smoke implemented for opencode yet",
+          "id": "isolated_smoke",
+          "status": "skip"
+        },
+        {
+          "detail": "readonly not proven for opencode adapter yet",
+          "id": "readonly_conformance",
+          "status": "skip"
+        }
+      ],
+      "configuredModel": null,
+      "configuredModelCheck": null,
+      "delegation": {
+        "available": false,
+        "reason": "manifest_unsupported",
+        "remediation": "Choose a harness that supports Claudexor MCP injection.",
+        "requiresFullAccess": false
+      },
+      "disabledIntents": [
+        "implement",
+        "repair",
+        "create_from_scratch",
+        "verify",
+        "synthesize",
+        "explain",
+        "audit",
+        "plan",
+        "spec",
+        "review"
+      ],
+      "enabledIntents": [],
+      "id": "opencode",
+      "manifest": {
+        "access_profiles_supported": [
+          "full",
+          "inherit_native"
+        ],
+        "adapter_version": "3.13.0",
+        "auth_modes": [],
+        "capabilities": {
+          "browser_tool": false,
+          "create_from_scratch": true,
+          "effort_levels": [],
+          "effort_levels_verified_against": null,
+          "implement": true,
+          "implementation_transport": "workspace",
+          "interactive": false,
+          "json_schema_output": false,
+          "known_models": [],
+          "known_models_verified_against": null,
+          "max_turns": false,
+          "model_effort_levels": {},
+          "plan": true,
+          "read_files": true,
+          "review": true,
+          "structured_output_channel": "final_message",
+          "synthesize": true,
+          "tool_lists": false,
+          "verify": true,
+          "web_policy": "uncontrolled",
+          "work_report_transport": "unsupported"
+        },
+        "capability_profile": {
+          "access_control": {
+            "readonly_mechanism": "none",
+            "write_mechanism": "none"
+          },
+          "attachment_inputs": [],
+          "auth": {
+            "credential_transports": [
+              {
+                "kind": "env_var",
+                "relocatable_by": [
+                  "ENV"
+                ],
+                "source": "api_key_env"
+              }
+            ],
+            "preferred_source": null,
+            "supported_sources": [
+              "api_key_env"
+            ]
+          },
+          "isolation": {
+            "supported_containment": [
+              "env_or_file_injection"
+            ]
+          },
+          "mcp_injection": false,
+          "mcp_injection_requires_full_access": false
+        },
+        "display_name": "OpenCode",
+        "id": "opencode",
+        "kind": "local_cli",
+        "provider_family": "opencode",
+        "version": "1.18.21"
+      },
+      "readiness": [
+        {
+          "detail": "1.18.21",
+          "id": "installed",
+          "kind": "binary",
+          "status": "pass",
+          "title": "Installed"
+        },
+        {
+          "detail": null,
+          "id": "provider_auth",
+          "kind": "auth",
+          "status": "fail",
+          "title": "Provider login"
+        },
+        {
+          "detail": "no isolated smoke implemented for opencode yet",
+          "id": "isolated_smoke",
+          "kind": "smoke",
+          "status": "skip",
+          "title": "Isolated API-key smoke"
+        },
+        {
+          "detail": "readonly not proven for opencode adapter yet",
+          "id": "readonly_conformance",
+          "kind": "probe",
+          "status": "skip",
+          "title": "Readonly conformance"
+        },
+        {
+          "detail": "no provider API key is configured",
+          "id": "auth_source:api_key_env",
+          "kind": "auth",
+          "status": "skip",
+          "title": "API key"
+        }
+      ],
+      "reasons": [
+        "opencode provider auth not configured"
+      ],
+      "routableIntents": [],
+      "setupLogin": null,
+      "status": "unavailable"
+    },
+    {
+      "authSources": [
+        {
+          "availability": "unavailable",
+          "detail": "OPENAI_API_KEY is not configured",
+          "source": "api_key_env",
+          "verification": "not_run"
+        }
+      ],
+      "checks": [
+        {
+          "detail": "OPENAI_API_KEY not set",
+          "id": "api_key",
+          "status": "fail"
+        }
+      ],
+      "configuredModel": null,
+      "configuredModelCheck": null,
+      "delegation": {
+        "available": false,
+        "reason": "manifest_unsupported",
+        "remediation": "Choose a harness that supports Claudexor MCP injection.",
+        "requiresFullAccess": false
+      },
+      "disabledIntents": [
+        "implement",
+        "plan",
+        "spec",
+        "review",
+        "synthesize",
+        "explain",
+        "create_from_scratch",
+        "repair",
+        "verify",
+        "audit"
+      ],
+      "enabledIntents": [],
+      "id": "raw-api",
+      "manifest": null,
+      "readiness": [
+        {
+          "detail": "OPENAI_API_KEY not set",
+          "id": "api_key",
+          "kind": "auth",
+          "status": "fail",
+          "title": "API key"
+        },
+        {
+          "detail": "OPENAI_API_KEY is not configured",
+          "id": "auth_source:api_key_env",
+          "kind": "auth",
+          "status": "skip",
+          "title": "API key"
+        }
+      ],
+      "reasons": [
+        "discover failed: raw-api unavailable: set OPENAI_API_KEY",
+        "set OPENAI_API_KEY to enable the raw-api harness"
+      ],
+      "routableIntents": [],
+      "setupLogin": null,
+      "status": "unavailable"
+    },
+    {
+      "authSources": [
+        {
+          "availability": "unavailable",
+          "detail": "OPENROUTER_API_KEY is not configured",
+          "source": "api_key_env",
+          "verification": "not_run"
+        }
+      ],
+      "checks": [
+        {
+          "detail": "OPENROUTER_API_KEY not set",
+          "id": "api_key",
+          "status": "fail"
+        }
+      ],
+      "configuredModel": null,
+      "configuredModelCheck": null,
+      "delegation": {
+        "available": false,
+        "reason": "manifest_unsupported",
+        "remediation": "Choose a harness that supports Claudexor MCP injection.",
+        "requiresFullAccess": false
+      },
+      "disabledIntents": [
+        "implement",
+        "plan",
+        "spec",
+        "review",
+        "synthesize",
+        "explain",
+        "create_from_scratch",
+        "repair",
+        "verify",
+        "audit"
+      ],
+      "enabledIntents": [],
+      "id": "openrouter",
+      "manifest": null,
+      "readiness": [
+        {
+          "detail": "OPENROUTER_API_KEY not set",
+          "id": "api_key",
+          "kind": "auth",
+          "status": "fail",
+          "title": "API key"
+        },
+        {
+          "detail": "OPENROUTER_API_KEY is not configured",
+          "id": "auth_source:api_key_env",
+          "kind": "auth",
+          "status": "skip",
+          "title": "API key"
+        }
+      ],
+      "reasons": [
+        "discover failed: openrouter unavailable: set OPENROUTER_API_KEY",
+        "set OPENROUTER_API_KEY to enable the openrouter harness"
+      ],
+      "routableIntents": [],
+      "setupLogin": null,
+      "status": "unavailable"
+    }
+  ]
+}

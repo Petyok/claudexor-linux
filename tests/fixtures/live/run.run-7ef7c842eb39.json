@@ -1,0 +1,610 @@
+{
+  "applyEligibility": null,
+  "artifacts": [
+    {
+      "kind": "directory",
+      "path": "arbitration"
+    },
+    {
+      "kind": "directory",
+      "path": "attempts"
+    },
+    {
+      "kind": "directory",
+      "path": "attempts/a01"
+    },
+    {
+      "bytes": 3094,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "attempts/a01/events.jsonl"
+    },
+    {
+      "kind": "directory",
+      "path": "context"
+    },
+    {
+      "bytes": 1179,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "context/task.yaml"
+    },
+    {
+      "bytes": 6800,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "events.jsonl"
+    },
+    {
+      "kind": "directory",
+      "path": "final"
+    },
+    {
+      "bytes": 15,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "final/answer.md"
+    },
+    {
+      "bytes": 911,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "final/run_facts.yaml"
+    },
+    {
+      "bytes": 91,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "final/summary.md"
+    },
+    {
+      "bytes": 3958,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "final/telemetry.yaml"
+    },
+    {
+      "bytes": 258,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "final/work_product.yaml"
+    },
+    {
+      "kind": "directory",
+      "path": "findings"
+    },
+    {
+      "kind": "directory",
+      "path": "reviews"
+    }
+  ],
+  "attemptExecution": [
+    {
+      "attemptId": "a01",
+      "harnessId": "claude",
+      "processing": {
+        "observed": "unknown",
+        "observedNative": [],
+        "reason": "native_fast_mode_disabled:sdk_opt_in_required",
+        "requested": null,
+        "source": "claude.managed_settings",
+        "submitted": null,
+        "submittedNative": null
+      },
+      "processingCostBasis": {
+        "kind": "unknown",
+        "nativeMode": null,
+        "source": "claude_fast_usage_credits; ordinary_subscription_receipts_remain_separate"
+      },
+      "usageCost": {
+        "cashKnowledge": "exact",
+        "cashUsd": 0,
+        "unknownUsd": 0,
+        "valuationKnowledge": "estimated",
+        "valuationUsd": 0.09783
+      }
+    }
+  ],
+  "budget": {
+    "cashKnowledge": "exact",
+    "estimated": false,
+    "evidence": "complete",
+    "paidBudget": {
+      "kind": "unlimited"
+    },
+    "remainingUsd": null,
+    "source": "events",
+    "spendUsd": 0,
+    "valuationKnowledge": "estimated",
+    "valuationUsd": 0.09783
+  },
+  "candidates": [],
+  "children": [],
+  "council": null,
+  "decision": null,
+  "failure": null,
+  "finalSummary": "# Run run-7ef7c842eb39 (ask)\n\n- Harnesses: a01:claude:success\n- Lifecycle: succeeded\n\npong\n",
+  "lastSeq": 16,
+  "operatorDecision": null,
+  "outcomeBanner": "Done · not reviewed",
+  "pendingInteractions": [],
+  "planProgress": null,
+  "planQuestions": [],
+  "planReadiness": null,
+  "primaryOutput": {
+    "bytes": 15,
+    "kind": "answer",
+    "path": "final/answer.md",
+    "text": "# Answer\n\npong\n",
+    "truncated": false
+  },
+  "requiredActions": [],
+  "reviewFindings": [],
+  "runFacts": {
+    "apply": {
+      "eligibility": null,
+      "operator_decision_present": false
+    },
+    "deliverable": {
+      "kind": "answer",
+      "path": "final/answer.md",
+      "present": true,
+      "producer_attempt_id": "a01"
+    },
+    "gates": {
+      "configured": false,
+      "executed": false,
+      "receipt_attempt_id": null,
+      "required": 0,
+      "state": "not_configured",
+      "total": 0
+    },
+    "generated_at": "2026-09-23T12:40:20.280Z",
+    "mode": "ask",
+    "outcome": {
+      "checks": "not_configured",
+      "lifecycle": "succeeded",
+      "noChanges": false,
+      "reason": null,
+      "review": "not_run",
+      "review_requested": false,
+      "work_state": {
+        "source": "absent",
+        "state": "unverified"
+      }
+    },
+    "participants": {
+      "attempts": [
+        {
+          "attempt_id": "a01",
+          "deliverable_present": true,
+          "harness_id": "claude",
+          "role": "candidate",
+          "status": "success"
+        }
+      ],
+      "planners": 0
+    },
+    "presentation": {
+      "primary": {
+        "kind": "answer",
+        "path": "final/answer.md"
+      },
+      "state": "ready"
+    },
+    "required_actions": [],
+    "review": {
+      "blocker_ids": [],
+      "blockers": 0,
+      "state": "not_run"
+    },
+    "run_id": "run-7ef7c842eb39",
+    "schema_version": 2,
+    "task_id": "task-6d87181b61d3"
+  },
+  "summary": {
+    "access": "readonly",
+    "authRoute": {
+      "attemptId": "a01",
+      "effective": "local_session",
+      "harnessId": "claude",
+      "modelMismatch": null,
+      "profileId": "claude-default",
+      "reason": "native_first",
+      "requested": "auto",
+      "source": "native_session"
+    },
+    "cachedInputTokens": 9772,
+    "createdAt": "2026-09-23T12:40:09.073Z",
+    "delegatedFromRunId": null,
+    "delegation": {
+      "effective": false,
+      "reason": "not_requested",
+      "remediation": null,
+      "requested": false,
+      "used": false
+    },
+    "effectiveAccess": "readonly",
+    "externalContextPolicy": "auto",
+    "failure": null,
+    "finishedAt": "2026-09-23T12:40:20.408Z",
+    "inputTokenUsage": {
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 9772,
+      "total_tokens": 9774
+    },
+    "inputTokens": 2,
+    "jobId": "job-c005f7997b22",
+    "mode": "ask",
+    "model": "claude-opus-5",
+    "outcomeFacts": {
+      "checks": "not_configured",
+      "lifecycle": "succeeded",
+      "noChanges": false,
+      "reason": null,
+      "review": "not_run",
+      "review_requested": false,
+      "work_state": {
+        "source": "absent",
+        "state": "unverified"
+      }
+    },
+    "outputConformance": null,
+    "outputReadyState": "ready",
+    "outputTokens": 4,
+    "paidBudget": {
+      "kind": "unlimited"
+    },
+    "parentRunId": null,
+    "primaryHarness": "claude",
+    "project": {
+      "context": "off",
+      "kind": "none",
+      "projectName": null,
+      "root": null
+    },
+    "prompt": "Reply with the single word: pong",
+    "requestRequirements": [],
+    "requestedAccess": "readonly",
+    "result": {
+      "adopted": null,
+      "applyState": "not_applied",
+      "blockers": 0,
+      "diffStat": null,
+      "kind": "none",
+      "postTurnSha": null,
+      "preTurnSha": null,
+      "revertAnchorId": null,
+      "revertable": false
+    },
+    "review": false,
+    "route": {
+      "harnessId": "claude",
+      "observedModel": "claude-opus-5",
+      "requestedModel": "claude-opus-5",
+      "verified": true
+    },
+    "routingRationale": {
+      "dropped": [],
+      "entries": [
+        {
+          "billing_knowledge": "subscription_entitlement",
+          "eligible": true,
+          "harness_id": "claude",
+          "incremental_cost_usd": null
+        }
+      ],
+      "goal": "auto",
+      "order": [
+        "claude"
+      ],
+      "paid_fallback": "when_unavailable",
+      "reason": "declared_order"
+    },
+    "runDir": "/home/user/.claudexor/v3/runs/run-7ef7c842eb39",
+    "runId": "run-7ef7c842eb39",
+    "spendEstimated": false,
+    "spendUsd": 0,
+    "startedAt": "2026-09-23T12:40:09.122Z",
+    "state": "succeeded",
+    "strategy": null,
+    "taskId": "task-6d87181b61d3",
+    "toolPermissionPolicy": {
+      "allow": [],
+      "deny": [],
+      "web": "auto"
+    },
+    "toolWarningsTotal": 0,
+    "waitingOnUser": false,
+    "webEvidence": {
+      "attempted": false,
+      "available": true,
+      "effectiveMode": "auto",
+      "errorSummary": null,
+      "mode": "auto",
+      "rawDetailRef": "final/telemetry.yaml",
+      "required": false,
+      "satisfied": false,
+      "status": "none",
+      "target": null,
+      "tool": null
+    },
+    "webMode": "auto",
+    "webRequired": false
+  },
+  "timeline": [
+    {
+      "attemptId": null,
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": null,
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "run · created",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:09.237Z",
+      "type": "run.created"
+    },
+    {
+      "attemptId": null,
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": null,
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "task · contract · created",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:09.428Z",
+      "type": "task.contract.created"
+    },
+    {
+      "attemptId": null,
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": "claude",
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "route · account · pool selected",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:14.854Z",
+      "type": "route.account.pool_selected"
+    },
+    {
+      "attemptId": null,
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": "claude",
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "session · continuity",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:14.995Z",
+      "type": "session.continuity"
+    },
+    {
+      "attemptId": "a01",
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": "claude",
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "harness · started",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:15.116Z",
+      "type": "harness.started"
+    },
+    {
+      "attemptId": "a01",
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": "claude",
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "started",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:17.437Z",
+      "type": "harness.event"
+    },
+    {
+      "attemptId": "a01",
+      "detail": "pong",
+      "errorSummary": null,
+      "harnessId": "claude",
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": "message",
+      "title": "pong",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:18.707Z",
+      "type": "harness.event"
+    },
+    {
+      "attemptId": "a01",
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": "claude",
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "usage: 2 in / 4 out",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:18.800Z",
+      "type": "harness.event"
+    },
+    {
+      "attemptId": "a01",
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": "claude",
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "budget · observation",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:18.809Z",
+      "type": "budget.observation"
+    },
+    {
+      "attemptId": "a01",
+      "detail": "pong",
+      "errorSummary": null,
+      "harnessId": "claude",
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": "message",
+      "title": "pong",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:18.812Z",
+      "type": "harness.event"
+    },
+    {
+      "attemptId": "a01",
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": "claude",
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "completed",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:20.135Z",
+      "type": "harness.event"
+    },
+    {
+      "attemptId": null,
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": null,
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "budget · cash",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:20.146Z",
+      "type": "budget.cash"
+    },
+    {
+      "attemptId": "a01",
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": "claude",
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "harness · completed",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:20.151Z",
+      "type": "harness.completed"
+    },
+    {
+      "attemptId": null,
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": null,
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "output · ready",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:20.185Z",
+      "type": "output.ready"
+    },
+    {
+      "attemptId": null,
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": null,
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "work product · emitted",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:20.237Z",
+      "type": "work_product.emitted"
+    },
+    {
+      "attemptId": null,
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": null,
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "run · completed",
+      "toolName": null,
+      "ts": "2026-09-23T12:40:20.238Z",
+      "type": "run.completed"
+    }
+  ],
+  "workProduct": {
+    "files": {
+      "answer.md": "/home/user/.claudexor/v3/runs/run-7ef7c842eb39/final/answer.md"
+    },
+    "id": "wp-831af7e494be",
+    "kind": "report",
+    "meta": {
+      "harnesses": [
+        "claude"
+      ],
+      "intent": "explain",
+      "mode": "ask",
+      "read_only": true
+    },
+    "producer_attempt_id": "a01",
+    "source_task_id": "task-6d87181b61d3"
+  }
+}

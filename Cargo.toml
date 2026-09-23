@@ -1,0 +1,33 @@
+[package]
+name = "claudexor-linux"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Native Linux client for the Claudexor daemon (egui)"
+
+[[bin]]
+name = "claudexor-linux"
+path = "src/main.rs"
+
+[dependencies]
+# eframe/egui pinned to 0.34: backdrop-blur-egui 0.2 (frosted panels, PLAN §5 L1)
+# targets exactly this egui line.
+eframe = { version = "0.34.3", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
+egui = "0.34.3"
+egui_glow = "0.34"
+glow = "0.17"
+# No syntect / image loaders: they cost ~5 MB of binary and tens of MB of RSS (PLAN §7 budgets).
+egui_commonmark = { version = "0.23", default-features = false, features = ["pulldown_cmark"] }
+backdrop-blur-egui = { version = "0.2", default-features = false, features = ["grab-pass"] }
+ureq = { version = "3.4", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "7"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

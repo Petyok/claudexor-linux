@@ -1,0 +1,11 @@
+{
+  "compatible": true,
+  "engine": {
+    "entry": "/home/user/.nvm/versions/node/v24.20.0/lib/node_modules/claudexor/node_modules/@claudexor/cli/dist/claudexord.js",
+    "sha": "unknown",
+    "version": "3.13.0"
+  },
+  "operationsPath": "/v2/operations",
+  "protocolMajor": 3,
+  "servingMode": "normal"
+}

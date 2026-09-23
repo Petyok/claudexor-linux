@@ -1,0 +1,118 @@
+{
+  "sessions": [],
+  "thread": {
+    "access": null,
+    "authPreference": "auto",
+    "createdAt": "2026-09-23T11:17:39.526Z",
+    "credentialProfileId": null,
+    "eligibleHarnesses": [],
+    "headRunId": "run-be5936d0f6fb",
+    "id": "th-fceb460e2489",
+    "mode": "ask",
+    "needsHuman": false,
+    "primaryHarness": null,
+    "purgeAfter": null,
+    "repoRoot": null,
+    "runIds": [
+      "run-3a038adcb248",
+      "run-be5936d0f6fb"
+    ],
+    "state": "active",
+    "title": "Reply with the single word: pong",
+    "trashedAt": null,
+    "updatedAt": "2026-09-23T11:33:32.386Z",
+    "workspaceMode": "in_place"
+  },
+  "turns": [
+    {
+      "answersPlanRunId": null,
+      "continuity": null,
+      "createdAt": "2026-09-23T11:17:39.627Z",
+      "enqueueError": null,
+      "id": "tn-214b3b7bb91f",
+      "kind": "initial",
+      "parentRunId": null,
+      "planHash": null,
+      "planReadinessOverridden": false,
+      "planRunId": null,
+      "prompt": "Reply with the single word: pong",
+      "run": {
+        "delegatedChildRunIds": [],
+        "delegation": null,
+        "finishedAt": "2026-09-23T11:17:44.032Z",
+        "mode": "ask",
+        "outcomeFacts": {
+          "checks": "not_configured",
+          "lifecycle": "failed",
+          "noChanges": false,
+          "reason": "harness_failed",
+          "review": "not_run",
+          "review_requested": false
+        },
+        "outputReadyState": "diagnostic",
+        "result": {
+          "adopted": null,
+          "applyState": "not_applied",
+          "blockers": 0,
+          "diffStat": null,
+          "kind": "none",
+          "postTurnSha": null,
+          "preTurnSha": null,
+          "revertAnchorId": null,
+          "revertable": false
+        },
+        "spendUsd": null,
+        "state": "failed",
+        "strategy": null,
+        "waitingOnUser": false
+      },
+      "runId": "run-3a038adcb248",
+      "threadId": "th-fceb460e2489"
+    },
+    {
+      "answersPlanRunId": null,
+      "continuity": null,
+      "createdAt": "2026-09-23T11:33:32.084Z",
+      "enqueueError": null,
+      "id": "tn-c153399fc764",
+      "kind": "followup",
+      "parentRunId": "run-3a038adcb248",
+      "planHash": null,
+      "planReadinessOverridden": false,
+      "planRunId": null,
+      "prompt": "Second turn from the Linux client",
+      "run": {
+        "delegatedChildRunIds": [],
+        "delegation": null,
+        "finishedAt": "2026-09-23T11:33:36.530Z",
+        "mode": "ask",
+        "outcomeFacts": {
+          "checks": "not_configured",
+          "lifecycle": "failed",
+          "noChanges": false,
+          "reason": "harness_failed",
+          "review": "not_run",
+          "review_requested": false
+        },
+        "outputReadyState": "diagnostic",
+        "result": {
+          "adopted": null,
+          "applyState": "not_applied",
+          "blockers": 0,
+          "diffStat": null,
+          "kind": "none",
+          "postTurnSha": null,
+          "preTurnSha": null,
+          "revertAnchorId": null,
+          "revertable": false
+        },
+        "spendUsd": null,
+        "state": "failed",
+        "strategy": null,
+        "waitingOnUser": false
+      },
+      "runId": "run-be5936d0f6fb",
+      "threadId": "th-fceb460e2489"
+    }
+  ]
+}

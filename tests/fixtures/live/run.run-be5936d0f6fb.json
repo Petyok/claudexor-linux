@@ -1,0 +1,328 @@
+{
+  "applyEligibility": null,
+  "artifacts": [
+    {
+      "kind": "directory",
+      "path": "arbitration"
+    },
+    {
+      "kind": "directory",
+      "path": "attempts"
+    },
+    {
+      "kind": "directory",
+      "path": "context"
+    },
+    {
+      "bytes": 164,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "context/context_error.md"
+    },
+    {
+      "bytes": 1169,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "context/task.yaml"
+    },
+    {
+      "bytes": 2061,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "events.jsonl"
+    },
+    {
+      "kind": "directory",
+      "path": "final"
+    },
+    {
+      "bytes": 406,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "final/failure.yaml"
+    },
+    {
+      "bytes": 742,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "final/run_facts.yaml"
+    },
+    {
+      "bytes": 215,
+      "kind": "file",
+      "mime": "text/plain",
+      "path": "final/summary.md"
+    },
+    {
+      "kind": "directory",
+      "path": "findings"
+    },
+    {
+      "kind": "directory",
+      "path": "reviews"
+    }
+  ],
+  "budget": {
+    "estimated": false,
+    "evidence": "complete",
+    "paidBudget": {
+      "kind": "unlimited"
+    },
+    "remainingUsd": null,
+    "source": "unknown",
+    "spendUsd": null,
+    "valuationKnowledge": "unknown",
+    "valuationUsd": null
+  },
+  "candidates": [],
+  "children": [],
+  "council": null,
+  "decision": null,
+  "failure": {
+    "attemptId": null,
+    "category": "harness_unavailable",
+    "code": null,
+    "eventRefs": [],
+    "harnessId": null,
+    "logRefs": [],
+    "nextActions": [],
+    "phase": "routing",
+    "rawDetailRef": null,
+    "resetsAt": null,
+    "runDir": "/home/user/.claudexor/v3/runs/run-be5936d0f6fb",
+    "safeMessage": "no doctor-OK default route or enabled account row for this mode; inspect `claudexor doctor` and `claudexor accounts`, or pass --harness explicitly",
+    "vendorFailure": null
+  },
+  "finalSummary": "# Run run-be5936d0f6fb (ask)\n\n- Lifecycle: failed\n- Phase: routing\n\nno doctor-OK default route or enabled account row for this mode; inspect `claudexor doctor` and `claudexor accounts`, or pass --harness explicitly\n",
+  "lastSeq": 4,
+  "operatorDecision": null,
+  "outcomeBanner": "Failed (harness failed)",
+  "pendingInteractions": [],
+  "planProgress": null,
+  "planQuestions": [],
+  "planReadiness": null,
+  "primaryOutput": {
+    "bytes": 215,
+    "kind": "diagnostic",
+    "path": "final/summary.md",
+    "text": "# Run run-be5936d0f6fb (ask)\n\n- Lifecycle: failed\n- Phase: routing\n\nno doctor-OK default route or enabled account row for this mode; inspect `claudexor doctor` and `claudexor accounts`, or pass --harness explicitly\n",
+    "truncated": false
+  },
+  "requiredActions": [],
+  "reviewFindings": [],
+  "runFacts": {
+    "apply": {
+      "eligibility": null,
+      "operator_decision_present": false
+    },
+    "deliverable": {
+      "kind": null,
+      "path": null,
+      "present": false,
+      "producer_attempt_id": null
+    },
+    "gates": {
+      "configured": false,
+      "executed": false,
+      "receipt_attempt_id": null,
+      "required": 0,
+      "state": "not_configured",
+      "total": 0
+    },
+    "generated_at": "2026-09-23T11:33:36.441Z",
+    "mode": "ask",
+    "outcome": {
+      "checks": "not_configured",
+      "lifecycle": "failed",
+      "noChanges": false,
+      "reason": "harness_failed",
+      "review": "not_run",
+      "review_requested": false
+    },
+    "participants": {
+      "attempts": [],
+      "planners": 0
+    },
+    "presentation": {
+      "primary": {
+        "kind": "diagnostic",
+        "path": "final/summary.md"
+      },
+      "state": "diagnostic"
+    },
+    "required_actions": [],
+    "review": {
+      "blocker_ids": [],
+      "blockers": 0,
+      "state": "not_run"
+    },
+    "run_id": "run-be5936d0f6fb",
+    "schema_version": 2,
+    "task_id": "task-fcea35ed5a54"
+  },
+  "summary": {
+    "access": "readonly",
+    "authRoute": null,
+    "cachedInputTokens": null,
+    "createdAt": "2026-09-23T11:33:32.184Z",
+    "delegatedFromRunId": null,
+    "delegation": null,
+    "effectiveAccess": "readonly",
+    "error": "no doctor-OK default route or enabled account row for this mode; inspect `claudexor doctor` and `claudexor accounts`, or pass --harness explicitly",
+    "externalContextPolicy": "auto",
+    "failure": {
+      "attemptId": null,
+      "category": "harness_unavailable",
+      "code": null,
+      "eventRefs": [],
+      "harnessId": null,
+      "logRefs": [],
+      "nextActions": [],
+      "phase": "routing",
+      "rawDetailRef": null,
+      "resetsAt": null,
+      "runDir": "/home/user/.claudexor/v3/runs/run-be5936d0f6fb",
+      "safeMessage": "no doctor-OK default route or enabled account row for this mode; inspect `claudexor doctor` and `claudexor accounts`, or pass --harness explicitly",
+      "vendorFailure": null
+    },
+    "finishedAt": "2026-09-23T11:33:36.530Z",
+    "inputTokens": null,
+    "jobId": "job-aa9cea707438",
+    "mode": "ask",
+    "outcomeFacts": {
+      "checks": "not_configured",
+      "lifecycle": "failed",
+      "noChanges": false,
+      "reason": "harness_failed",
+      "review": "not_run",
+      "review_requested": false
+    },
+    "outputConformance": null,
+    "outputReadyState": "diagnostic",
+    "outputTokens": null,
+    "paidBudget": {
+      "kind": "unlimited"
+    },
+    "parentRunId": "run-3a038adcb248",
+    "project": {
+      "context": "off",
+      "kind": "none",
+      "projectName": null,
+      "root": null
+    },
+    "prompt": "Second turn from the Linux client",
+    "requestRequirements": [],
+    "requestedAccess": "readonly",
+    "result": {
+      "adopted": null,
+      "applyState": "not_applied",
+      "blockers": 0,
+      "diffStat": null,
+      "kind": "none",
+      "postTurnSha": null,
+      "preTurnSha": null,
+      "revertAnchorId": null,
+      "revertable": false
+    },
+    "review": false,
+    "route": null,
+    "routingRationale": null,
+    "runDir": "/home/user/.claudexor/v3/runs/run-be5936d0f6fb",
+    "runId": "run-be5936d0f6fb",
+    "spendEstimated": false,
+    "spendUsd": null,
+    "startedAt": "2026-09-23T11:33:32.241Z",
+    "state": "failed",
+    "strategy": null,
+    "taskId": "task-fcea35ed5a54",
+    "toolPermissionPolicy": {
+      "allow": [],
+      "deny": [],
+      "web": "auto"
+    },
+    "toolWarningsTotal": 0,
+    "waitingOnUser": false,
+    "webEvidence": {
+      "attempted": false,
+      "available": false,
+      "effectiveMode": "auto",
+      "errorSummary": null,
+      "mode": "auto",
+      "rawDetailRef": null,
+      "required": false,
+      "satisfied": false,
+      "status": "none",
+      "target": null,
+      "tool": null
+    },
+    "webMode": "auto",
+    "webRequired": false
+  },
+  "timeline": [
+    {
+      "attemptId": null,
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": null,
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "run · created",
+      "toolName": null,
+      "ts": "2026-09-23T11:33:32.294Z",
+      "type": "run.created"
+    },
+    {
+      "attemptId": null,
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": null,
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "task · contract · created",
+      "toolName": null,
+      "ts": "2026-09-23T11:33:32.479Z",
+      "type": "task.contract.created"
+    },
+    {
+      "attemptId": null,
+      "detail": null,
+      "errorSummary": null,
+      "harnessId": null,
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "info",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "output · ready",
+      "toolName": null,
+      "ts": "2026-09-23T11:33:36.396Z",
+      "type": "output.ready"
+    },
+    {
+      "attemptId": null,
+      "detail": "no doctor-OK default route or enabled account row for this mode; inspect `claudexor doctor` and `claudexor accounts`, or pass --harness explicitly",
+      "errorSummary": "no doctor-OK default route or enabled account row for this mode; inspect `claudexor doctor` and `claudexor accounts`, or pass --harness explicitly",
+      "harnessId": null,
+      "ignoredSettings": [],
+      "rawRef": "events.jsonl",
+      "severity": "error",
+      "target": null,
+      "textDelta": false,
+      "textKind": null,
+      "title": "no doctor-OK default route or enabled account row for this mode; inspect `claudexor doctor` and `claudexor accounts`, or pass --harness explicitly",
+      "toolName": null,
+      "ts": "2026-09-23T11:33:36.432Z",
+      "type": "run.failed"
+    }
+  ],
+  "workProduct": null
+}

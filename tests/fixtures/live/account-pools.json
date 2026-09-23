@@ -1,0 +1,53 @@
+{
+  "accountPools": [
+    {
+      "harness_id": "agy",
+      "next_up": {
+        "kind": "none",
+        "reason": "no enabled account is signed in for this harness; connect an account or pin one per-run (--profile)"
+      }
+    },
+    {
+      "harness_id": "claude",
+      "next_up": {
+        "kind": "profile",
+        "profileId": "claude-default"
+      }
+    },
+    {
+      "harness_id": "codex",
+      "next_up": {
+        "kind": "none",
+        "reason": "no enabled account is signed in for this harness; connect an account or pin one per-run (--profile)"
+      }
+    },
+    {
+      "harness_id": "cursor",
+      "next_up": {
+        "kind": "none",
+        "reason": "no enabled account is signed in for this harness; connect an account or pin one per-run (--profile)"
+      }
+    },
+    {
+      "harness_id": "opencode",
+      "next_up": {
+        "kind": "none",
+        "reason": "no enabled account is signed in for this harness; connect an account or pin one per-run (--profile)"
+      }
+    },
+    {
+      "harness_id": "openrouter",
+      "next_up": {
+        "kind": "none",
+        "reason": "no enabled account is signed in for this harness; connect an account or pin one per-run (--profile)"
+      }
+    },
+    {
+      "harness_id": "raw-api",
+      "next_up": {
+        "kind": "none",
+        "reason": "no enabled account is signed in for this harness; connect an account or pin one per-run (--profile)"
+      }
+    }
+  ]
+}

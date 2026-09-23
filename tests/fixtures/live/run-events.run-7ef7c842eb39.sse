@@ -1,0 +1,69 @@
+: connected
+
+id: 1
+event: run.created
+data: {"seq":1,"ts":"2026-09-23T12:40:09.237Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"run.created","payload":{"mode":"ask","prompt":"Reply with the single word: pong"}}
+
+id: 2
+event: task.contract.created
+data: {"seq":2,"ts":"2026-09-23T12:40:09.428Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"task.contract.created","payload":{"task_contract_hash":"sha256:63159dbf7dc43fdf5abe9367b62b0dd5e761bae3b071bed324716591978f9132"}}
+
+id: 3
+event: route.account.pool_selected
+data: {"seq":3,"ts":"2026-09-23T12:40:14.854Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"route.account.pool_selected","payload":{"harness_id":"claude","profile_id":"claude-default","quota":"fresh_headroom","headroom":0.6}}
+
+id: 4
+event: session.continuity
+data: {"seq":4,"ts":"2026-09-23T12:40:14.995Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"session.continuity","payload":{"thread_id":"th-0e69b31e2c2b","harness_id":"claude","kind":"fresh","packet_turns":0,"summarized":false,"lane_switched_from":null}}
+
+id: 5
+event: harness.started
+data: {"seq":5,"ts":"2026-09-23T12:40:15.116Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"harness.started","payload":{"harness_id":"claude","attempt_id":"a01","external_context_policy":"auto"}}
+
+id: 6
+event: harness.event
+data: {"seq":6,"ts":"2026-09-23T12:40:17.437Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"harness.event","payload":{"harness_id":"claude","attempt_id":"a01","session_id":"ses-cb0e9f9451f8","ts":"2026-09-23T12:40:17.254Z","type":"started","title":"started","observed_model":"claude-opus-5","credential_route":"vendor_native","payload":{"tools":["AskUserQuestion","Glob","Grep","Read","WebFetch","WebSearch"],"plugins":[{"name":"agents-md","path":"builtin","source":"agents-md@builtin"},{"name":"telemetry","path":"builtin","source":"telemetry@builtin"}],"mcp_servers":[],"native_session_id":"37b7ce8d-593b-4390-968b-25dda30275dc","native_fast_mode_state":"off"}}}
+
+id: 7
+event: harness.event
+data: {"seq":7,"ts":"2026-09-23T12:40:18.707Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"harness.event","payload":{"harness_id":"claude","attempt_id":"a01","session_id":"ses-cb0e9f9451f8","ts":"2026-09-23T12:40:18.705Z","type":"message","title":"pong","text":"pong","credential_route":"vendor_native"}}
+
+id: 8
+event: harness.event
+data: {"seq":8,"ts":"2026-09-23T12:40:18.800Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"harness.event","payload":{"harness_id":"claude","attempt_id":"a01","session_id":"ses-cb0e9f9451f8","ts":"2026-09-23T12:40:18.799Z","type":"usage","title":"usage: 2 in / 4 out","usage":{"input_tokens":2,"output_tokens":4,"cached_input_tokens":9772,"input_token_usage":{"total_tokens":9774,"cache_read_tokens":0,"cache_write_tokens":9772},"cost_usd":0.09783,"cost_basis":{"kind":"valuation","source":"claude.modelUsage.costBasis=list"},"estimated":true},"credential_route":"vendor_native","payload":{"native_fast_mode_state":"off"}}}
+
+id: 9
+event: budget.observation
+data: {"seq":9,"ts":"2026-09-23T12:40:18.809Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"budget.observation","payload":{"harness_id":"claude","attempt_id":"a01","kind":"spend","usd":0.09783,"estimated":true}}
+
+id: 10
+event: harness.event
+data: {"seq":10,"ts":"2026-09-23T12:40:18.812Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"harness.event","payload":{"harness_id":"claude","attempt_id":"a01","session_id":"ses-cb0e9f9451f8","ts":"2026-09-23T12:40:18.799Z","type":"message","title":"pong","text":"pong","credential_route":"vendor_native","final":true,"payload":{"final_source":"result","native_fast_mode_state":"off"}}}
+
+id: 11
+event: harness.event
+data: {"seq":11,"ts":"2026-09-23T12:40:20.135Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"harness.event","payload":{"harness_id":"claude","attempt_id":"a01","session_id":"ses-cb0e9f9451f8","ts":"2026-09-23T12:40:20.134Z","type":"completed","title":"completed","payload":{"exit_code":0}}}
+
+id: 12
+event: budget.cash
+data: {"seq":12,"ts":"2026-09-23T12:40:20.146Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"budget.cash","payload":{"cash_spend_usd":0,"valuation_usd":0.09783,"estimated":false,"valuation_knowledge":"estimated","cash_knowledge":"exact"}}
+
+id: 13
+event: harness.completed
+data: {"seq":13,"ts":"2026-09-23T12:40:20.151Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"harness.completed","payload":{"harness_id":"claude","attempt_id":"a01","status":"success","web_evidence":{"required":false,"mode":"auto","effective_mode":"auto","attempted":false,"satisfied":false,"status":"none","verification":"none","tool":null,"target":null,"error_summary":null},"tool_errors_total":0,"unrecovered_tool_errors":0,"tool_errors":[],"tool_warnings_count":0,"outcome":{"deliverablePresent":true,"gatesPassed":null,"harnessErrored":false,"webRequiredUnsatisfied":false,"toolWarningsCount":0,"status":"success","workState":{"state":"unverified","source":"absent"}}}}
+
+id: 14
+event: output.ready
+data: {"seq":14,"ts":"2026-09-23T12:40:20.185Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"output.ready","payload":{"kind":"answer","path":"final/answer.md"}}
+
+id: 15
+event: work_product.emitted
+data: {"seq":15,"ts":"2026-09-23T12:40:20.237Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"work_product.emitted","payload":{"kind":"report","winner":"a01"}}
+
+id: 16
+event: run.completed
+data: {"seq":16,"ts":"2026-09-23T12:40:20.238Z","run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","thread_id":"th-0e69b31e2c2b","type":"run.completed","payload":{"lifecycle":"succeeded","facts":{"lifecycle":"succeeded","noChanges":false,"checks":"not_configured","review":"not_run","review_requested":false,"reason":null,"work_state":{"state":"unverified","source":"absent"}},"reason":null,"run_facts":{"schema_version":2,"run_id":"run-7ef7c842eb39","task_id":"task-6d87181b61d3","mode":"ask","outcome":{"lifecycle":"succeeded","noChanges":false,"checks":"not_configured","review":"not_run","review_requested":false,"reason":null,"work_state":{"state":"unverified","source":"absent"}},"deliverable":{"present":true,"kind":"answer","path":"final/answer.md","producer_attempt_id":"a01"},"presentation":{"state":"ready","primary":{"kind":"answer","path":"final/answer.md"}},"participants":{"planners":0,"attempts":[{"attempt_id":"a01","harness_id":"claude","role":"candidate","deliverable_present":true,"status":"success"}]},"gates":{"configured":false,"required":0,"total":0,"executed":false,"state":"not_configured","receipt_attempt_id":null},"review":{"state":"not_run","blocker_ids":[],"blockers":0},"apply":{"eligibility":null,"operator_decision_present":false},"required_actions":[],"generated_at":"2026-09-23T12:40:20.280Z"}}}
+
+event: end
+data: {}
+
