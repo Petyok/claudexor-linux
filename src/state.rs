@@ -78,6 +78,24 @@ pub enum Msg {
     LoginSnap(Result<SetupSnapshot, ApiError>),
     LoginInput(Result<SetupJob, ApiError>),
     Trust(String, Result<Option<TrustState>, ApiError>),
+    Diff(String, Result<String, ApiError>),
+    Files(String, Result<ArtifactList, ApiError>),
+    /// A workspace action on a run finished: (run, outcome line or error).
+    RunAction(String, Result<String, String>),
+    ThreadApplied(String, Result<ThreadApplyResponse, ApiError>),
+    FileSaved(Result<std::path::PathBuf, String>),
+    Settings(Result<Settings, ApiError>),
+    SettingsSaved(Result<Settings, ApiError>),
+    Secrets(Result<SecretList, ApiError>),
+    SecretChanged(&'static str, Result<(), ApiError>),
+    TrustList(Result<TrustList, ApiError>),
+}
+
+/// A value fetched on demand for the UI.
+pub enum Fetch<T> {
+    Loading,
+    Ready(T),
+    Failed(String),
 }
 
 /// Live state of one run stream (keyed by the id the stream was opened with:
@@ -89,6 +107,8 @@ pub struct Live {
     /// `run.completed` | `run.failed` | `run.blocked` once seen.
     pub terminal: Option<String>,
     pub waiting: bool,
+    /// Engine routing notes worth surfacing (account switched at a quota limit, …).
+    pub notes: Vec<String>,
     pub started: Instant,
     pub finished: Option<Instant>,
     stop: Option<Arc<AtomicBool>>,
@@ -103,6 +123,7 @@ impl Live {
             phase: "queued".into(),
             terminal: None,
             waiting: false,
+            notes: vec![],
             started: Instant::now(),
             finished: None,
             stop: None,
@@ -211,6 +232,21 @@ pub struct State {
     pub details: HashMap<String, RunDetail>,
     /// Last live-driven detail refresh per run (throttle).
     detail_at: HashMap<String, Instant>,
+    /// Workspace: a run's `final/patch.diff`, its produced outputs, action state.
+    pub diffs: HashMap<String, Fetch<String>>,
+    pub files: HashMap<String, Fetch<Vec<ArtifactInfo>>>,
+    pub run_busy: HashSet<String>,
+    pub run_note: HashMap<String, Result<String, String>>,
+    pub thread_apply: HashMap<String, Fetch<String>>,
+    /// Settings screen data (loaded when it opens).
+    pub settings: Option<Fetch<Settings>>,
+    pub settings_note: Option<Result<String, String>>,
+    pub secrets: Option<Vec<Secret>>,
+    pub trust_all: Option<Vec<TrustState>>,
+    /// The thread list came from the offline cache, not the engine.
+    pub threads_cached: bool,
+    /// Ask the shell to open the accounts popover (onboarding's Set up button).
+    pub want_accounts: bool,
     pub answers: HashMap<String, AnswerState>,
     run_flight: HashSet<String>,
     /// Turns whose activity the user expanded (terminal turns collapse by default).
@@ -283,7 +319,8 @@ impl State {
             client: None,
             conn: Conn::Connecting,
             stale,
-            threads: vec![],
+            // shown read-only until the engine answers (then replaced + re-saved)
+            threads: load_thread_cache(),
             threads_loaded: false,
             selected: None,
             detail: None,
@@ -302,6 +339,17 @@ impl State {
             models: HashMap::new(),
             trust: HashMap::new(),
             detail_at: HashMap::new(),
+            diffs: HashMap::new(),
+            files: HashMap::new(),
+            run_busy: HashSet::new(),
+            run_note: HashMap::new(),
+            thread_apply: HashMap::new(),
+            settings: None,
+            settings_note: None,
+            secrets: None,
+            trust_all: None,
+            threads_cached: true,
+            want_accounts: false,
             quota: None,
             quota_error: None,
             quota_loading: false,
@@ -473,6 +521,121 @@ impl State {
         }
         let ungranted = mode == "agent" && self.composer.opts.access == Some("full") && !self.repo_trust().is_some_and(|t| t.allow_full_access);
         ungranted.then(|| "Full access needs a grant for this repo (Options)".into())
+    }
+
+    // ---- workspace: changes, apply, decisions, outputs --------------------------
+
+    pub fn load_diff(&mut self, run_id: &str) {
+        if self.diffs.contains_key(run_id) {
+            return;
+        }
+        self.diffs.insert(run_id.to_string(), Fetch::Loading);
+        let r = run_id.to_string();
+        self.spawn(move |c| Msg::Diff(r.clone(), c.artifact_text(&r, "final/patch.diff")));
+    }
+
+    pub fn load_files(&mut self, run_id: &str) {
+        if self.files.contains_key(run_id) {
+            return;
+        }
+        self.files.insert(run_id.to_string(), Fetch::Loading);
+        let r = run_id.to_string();
+        self.spawn(move |c| Msg::Files(r.clone(), c.run_files(&r, "produced")));
+    }
+
+    /// Apply a run's patch (`apply` | `branch`).
+    pub fn apply_run(&mut self, run_id: &str, mode: &'static str) {
+        self.run_action(run_id, move |c, r| c.apply_run(r, mode).map(|d| d.describe()));
+    }
+
+    /// accept_risk | rerun_with_feedback | override_needs_human | revert_run.
+    pub fn decide(&mut self, run_id: &str, body: Value) {
+        self.run_action(run_id, move |c, r| {
+            c.decide(r, body.clone()).map(|d| {
+                let mut line = match d.status.as_str() {
+                    "applied" if body["action"] == "revert_run" => "Reverted to the pre-turn state".to_string(),
+                    "applied" => "Decision recorded".into(),
+                    "requeued" => format!("Rerun queued{}", d.new_run_id.map(|id| format!(" as {id}")).unwrap_or_default()),
+                    other => format!("Engine answered: {other}"),
+                };
+                // the engine's message often restates the status: add it only when it says more
+                if let Some(m) = d.message.filter(|m| !m.is_empty() && !line.to_lowercase().contains(&m.to_lowercase())) {
+                    line.push_str(&format!(" · {m}"));
+                }
+                line
+            })
+        });
+    }
+
+    fn run_action(&mut self, run_id: &str, f: impl Fn(&Client, &str) -> Result<String, ApiError> + Send + 'static) {
+        if !self.run_busy.insert(run_id.to_string()) {
+            return;
+        }
+        self.run_note.remove(run_id);
+        let r = run_id.to_string();
+        self.spawn(move |c| Msg::RunAction(r.clone(), f(c, &r).map_err(|e| e.to_string())));
+    }
+
+    pub fn apply_thread(&mut self, thread_id: &str, mode: &'static str) {
+        if matches!(self.thread_apply.get(thread_id), Some(Fetch::Loading)) {
+            return;
+        }
+        self.thread_apply.insert(thread_id.to_string(), Fetch::Loading);
+        let t = thread_id.to_string();
+        self.spawn(move |c| Msg::ThreadApplied(t.clone(), c.apply_thread(&t, mode)));
+    }
+
+    /// Save one produced output to the cache dir (owner-only) and open it.
+    pub fn open_output(&mut self, run_id: &str, path: &str) {
+        let (r, p) = (run_id.to_string(), path.to_string());
+        self.spawn(move |c| {
+            let saved = c.run_file(&r, "produced", &p, 64 * 1024 * 1024).map_err(|e| e.to_string()).and_then(|bytes| save_output(&r, &p, &bytes));
+            Msg::FileSaved(saved)
+        });
+    }
+
+    // ---- settings ------------------------------------------------------------------
+
+    pub fn load_settings(&mut self) {
+        if self.client.is_none() {
+            return;
+        }
+        if !matches!(self.settings, Some(Fetch::Ready(_))) {
+            self.settings = Some(Fetch::Loading);
+        }
+        self.spawn(|c| Msg::Settings(c.settings()));
+        self.spawn(|c| Msg::Secrets(c.secrets()));
+        self.spawn(|c| Msg::TrustList(c.trust_list()));
+    }
+
+    /// One partial patch, e.g. `{"routingGoal": "economy"}`; the reply is the new snapshot.
+    pub fn save_settings(&mut self, patch: Value) {
+        self.settings_note = None;
+        self.spawn(move |c| Msg::SettingsSaved(c.update_settings(&patch)));
+    }
+
+    pub fn set_secret(&mut self, name: &str, value: String) {
+        let n = name.to_string();
+        self.spawn(move |c| Msg::SecretChanged("Save key", c.set_secret(&n, &value).map(drop)));
+    }
+
+    pub fn delete_secret(&mut self, name: &str) {
+        let n = name.to_string();
+        self.spawn(move |c| Msg::SecretChanged("Remove key", c.delete_secret(&n).map(drop)));
+    }
+
+    pub fn revoke_full_access(&mut self, root: &str) {
+        let r = root.to_string();
+        self.trust.remove(root);
+        self.spawn(move |c| {
+            let res = c.revoke_full_access(&r).and_then(|_| c.trust_list());
+            Msg::TrustList(res)
+        });
+    }
+
+    /// Harness Doctor "Recheck": re-probe every harness.
+    pub fn recheck_harnesses(&mut self) {
+        self.spawn(|c| Msg::Harnesses(c.harnesses_fresh()));
     }
 
     pub fn select(&mut self, id: Option<String>) {
@@ -995,8 +1158,10 @@ impl State {
                         // keep trashed rows too: the sidebar's Trash view lists them
                         let mut threads: Vec<Thread> = list.threads;
                         threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                        save_thread_cache(&threads);
                         self.threads = threads;
                         self.threads_loaded = true;
+                        self.threads_cached = false;
                     }
                     Err(e) => self.note(&e),
                 }
@@ -1071,6 +1236,13 @@ impl State {
                     "run.created" | "harness.started" => live.phase = "running".into(),
                     "interaction.requested" => live.waiting = true,
                     "interaction.answered" | "interaction.timeout" | "interaction.answer_discarded" => live.waiting = false,
+                    "route.profile.rotated" | "route.profile.headroom_exceeded" | "route.profile.rotation_exhausted" | "route.primary.diverged" => {
+                        if let Some(n) = route_note(&kind, &ev) {
+                            if !live.notes.contains(&n) {
+                                live.notes.push(n);
+                            }
+                        }
+                    }
                     "run.completed" | "run.failed" | "run.blocked" => {
                         live.terminal = Some(kind.clone());
                         live.phase = kind.trim_start_matches("run.").into();
@@ -1182,6 +1354,83 @@ impl State {
                     self.harnesses.sort_by_key(|h| (h.status != "ok", h.id.clone()));
                 }
                 Err(e) => self.note(&e),
+            },
+            Msg::Diff(id, r) => {
+                let v = match r {
+                    Ok(t) => Fetch::Ready(t),
+                    Err(ApiError::Http { status: 404, .. }) => Fetch::Ready(String::new()),
+                    Err(e) => Fetch::Failed(e.to_string()),
+                };
+                self.diffs.insert(id, v);
+            }
+            Msg::Files(id, r) => {
+                let v = match r {
+                    Ok(l) => Fetch::Ready(l.artifacts.into_iter().filter(|a| a.kind != "directory").collect()),
+                    Err(e) => Fetch::Failed(e.to_string()),
+                };
+                self.files.insert(id, v);
+            }
+            Msg::RunAction(id, r) => {
+                self.run_busy.remove(&id);
+                self.run_note.insert(id.clone(), r);
+                // the run's apply state / eligibility changed: re-read it and the thread
+                self.run_flight.remove(&id);
+                self.load_run(&id, false);
+                self.refresh_detail();
+            }
+            Msg::ThreadApplied(tid, r) => {
+                let v = match r {
+                    Ok(a) => {
+                        let mut line = match a.status.as_str() {
+                            "applied" => "Applied the thread's changes".to_string(),
+                            "branched" => "Applied as a branch".into(),
+                            "empty" => "Nothing to apply".into(),
+                            "conflict" => "Conflict: the project changed underneath".into(),
+                            other => format!("Engine answered: {other}"),
+                        };
+                        if let Some(d) = a.detail.filter(|d| !d.is_empty()) {
+                            line.push_str(&format!(" · {d}"));
+                        }
+                        if a.applied { Fetch::Ready(line) } else { Fetch::Failed(line) }
+                    }
+                    Err(e) => Fetch::Failed(e.to_string()),
+                };
+                self.thread_apply.insert(tid, v);
+                self.refresh_detail();
+            }
+            Msg::FileSaved(r) => match r {
+                Ok(path) => self.open_url(&path.to_string_lossy()),
+                Err(e) => self.error = Some(format!("Open output: {e}")),
+            },
+            Msg::Settings(r) => {
+                self.settings = Some(match r {
+                    Ok(st) => Fetch::Ready(st),
+                    Err(e) => Fetch::Failed(e.to_string()),
+                });
+            }
+            Msg::SettingsSaved(r) => match r {
+                Ok(st) => {
+                    self.settings = Some(Fetch::Ready(st));
+                    self.settings_note = Some(Ok("Saved".into()));
+                }
+                Err(e) => self.settings_note = Some(Err(e.to_string())),
+            },
+            Msg::Secrets(r) => match r {
+                Ok(l) => self.secrets = Some(l.secrets),
+                Err(e) => self.settings_note = Some(Err(format!("Secrets: {e}"))),
+            },
+            Msg::SecretChanged(what, r) => {
+                match r {
+                    Ok(()) => self.settings_note = Some(Ok(format!("{what}: done"))),
+                    Err(e) => self.settings_note = Some(Err(format!("{what}: {e}"))),
+                }
+                // auth readiness may have changed with the key
+                self.spawn(|c| Msg::Secrets(c.secrets()));
+                self.spawn(|c| Msg::Harnesses(c.harnesses_fresh()));
+            }
+            Msg::TrustList(r) => match r {
+                Ok(l) => self.trust_all = Some(l.entries),
+                Err(e) => self.settings_note = Some(Err(format!("Trust: {e}"))),
             },
             Msg::Trust(root, r) => {
                 match r {
@@ -1408,6 +1657,28 @@ pub fn failure_line(f: &RunFailure) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn route_notes_read_the_payload() {
+        let ev: Value = serde_json::json!({"type": "route.profile.rotated", "payload": {"harness_id": "claude", "to_profile_id": "work"}});
+        assert_eq!(route_note("route.profile.rotated", &ev).as_deref(), Some("Switched to account work (claude): quota limit"));
+        let ev: Value = serde_json::json!({"payload": {"requested": "codex", "effective": "claude"}});
+        assert_eq!(route_note("route.primary.diverged", &ev).as_deref(), Some("Routed to claude instead of codex"));
+        assert!(route_note("route.account.pool_selected", &ev).is_none());
+    }
+
+    #[test]
+    fn thread_cache_round_trips_owner_only() {
+        let dir = std::env::temp_dir().join(format!("cxl-cache-{}", std::process::id()));
+        let path = dir.join("threads.json");
+        let t: Thread = serde_json::from_value(serde_json::json!({"id": "th-1", "title": "x", "updatedAt": "2026"})).unwrap();
+        write_private(&path, &serde_json::to_vec(&[t]).unwrap()).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let back: Vec<Thread> = serde_json::from_slice(&crate::api::read_private(&path).unwrap().unwrap()).unwrap();
+        assert_eq!((back[0].id.as_str(), back[0].updated_at.as_str()), ("th-1", "2026"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     use super::*;
 
     #[test]
@@ -1524,4 +1795,59 @@ mod attach_tests {
         assert_eq!(super::mime_for("main.rs"), ("file", "text/plain"));
         assert_eq!(super::mime_for("blob"), ("file", "application/octet-stream"));
     }
+}
+
+/// A one-line note for a routing event the engine already acted on.
+fn route_note(kind: &str, ev: &Value) -> Option<String> {
+    let s = |k: &str| ev.get(k).and_then(Value::as_str).or_else(|| ev.get("payload").and_then(|p| p.get(k)).and_then(Value::as_str));
+    let h = s("harness_id").unwrap_or("the harness");
+    Some(match kind {
+        "route.profile.rotated" => format!("Switched to account {} ({h}): quota limit", s("to_profile_id").unwrap_or("default account")),
+        "route.profile.headroom_exceeded" => format!("{h}: this account is near its quota limit"),
+        "route.profile.rotation_exhausted" => format!("{h}: every enabled account is at its quota limit"),
+        "route.primary.diverged" => {
+            format!("Routed to {} instead of {}{}", s("effective")?, s("requested")?, s("reason").map(|r| format!(" · {r}")).unwrap_or_default())
+        }
+        _ => return None,
+    })
+}
+
+fn cache_dir() -> Option<std::path::PathBuf> {
+    dirs::cache_dir().map(|d| d.join("claudexor-linux"))
+}
+
+/// Write owner-only: thread titles and outputs are private.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    if let Some(dir) = path.parent() {
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&tmp)?;
+    f.write_all(bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// The last thread list the engine served, shown read-only while it is offline.
+fn save_thread_cache(threads: &[Thread]) {
+    if let (Some(dir), Ok(bytes)) = (cache_dir(), serde_json::to_vec(threads)) {
+        let _ = write_private(&dir.join("threads.json"), &bytes);
+    }
+}
+
+pub fn load_thread_cache() -> Vec<Thread> {
+    let Some(path) = cache_dir().map(|d| d.join("threads.json")) else { return vec![] };
+    match crate::api::read_private(&path) {
+        Ok(Some(bytes)) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        _ => vec![],
+    }
+}
+
+fn save_output(run_id: &str, path: &str, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+    let name = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).filter(|n| !n.starts_with('.')).ok_or("unsafe file name")?;
+    let run: String = run_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    let dest = cache_dir().ok_or("no cache directory")?.join("outputs").join(run).join(name);
+    write_private(&dest, bytes).map_err(|e| e.to_string())?;
+    Ok(dest)
 }

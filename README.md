@@ -27,6 +27,11 @@ running (`CXL_NO_AUTOSTART=1` to opt out), and reconnects on its own.
   Each turn's outcome banner opens run details: phases, access, auth route, web
   evidence, context continuity, budget, plan checklist, Best-of candidates,
   review findings, sub-runs and warnings.
+- **Changes**: per Agent turn, the patch as a coloured diff, **Apply patch** /
+  **Apply as branch**, **Revert** to the pre-turn state, **Apply thread** for
+  isolated threads, and a decision bar for blocked runs (accept risk, rerun with
+  feedback, override needs-human with a confirm). Produced files open in the
+  desktop's default app.
 - **Plan**: readiness chip, answer the plan's open questions (sent as a follow-up
   plan turn), **Implement plan** / **Implement anyway** (recorded override).
 - **Composer**: Ask / Plan / Agent, project, harness, model, effort, account pin,
@@ -38,6 +43,14 @@ running (`CXL_NO_AUTOSTART=1` to opt out), and reconnects on its own.
   workspace.
 - **Accounts**: per-account readiness and quota windows, Enabled toggle, in-app
   **Log in** (open the link, paste the code back), Add account, Remove.
+- **Settings** (⚙ menu): routing goal, paid fallback, primary harness, auth
+  route, environment; per-run budget cap and question timeout; Harness Doctor
+  with readiness checks, Recheck and per-harness default model / effort; API
+  keys (write-only) and full-access grants with Revoke; engine concurrency.
+- **Onboarding and offline**: a "Set up a harness" prompt while none is ready,
+  a note on the turn when the engine switches accounts at a quota limit, and the
+  last thread list kept (owner-only, in `~/.cache/claudexor-linux`) and shown
+  read-only while the engine is offline.
 - **Desktop notifications** (notify-send) when a turn finishes or needs you and the
   window is not focused.
 - **Glass**: compositor blur behind the window, frosted popovers, a refraction shader
@@ -79,5 +92,5 @@ Reference measurements on a low-end integrated GPU (Intel HD 6000, Mesa 26.2),
 | idle CPU | 0% | 0.03% (1 tick / 30 s: SSE heartbeat) |
 | cold start → window | < 300 ms | 220 ms |
 | frame with glass (GPU) | < 4 ms | 1.6 ms avg, 1.9 ms max |
-| release binary | < 15 MB | 13.8 MB (with AccessKit) |
+| release binary | < 15 MB | 14.1 MB (with AccessKit) |
 | idle RSS | < 80 MB | 94 MB VmRSS, of which 65 MB is Mesa's shared `libLLVM`/`libgallium`; app-private 22 MB, PSS 36 MB |

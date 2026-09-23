@@ -49,7 +49,11 @@ pub fn show(ui: &mut Ui, v: &mut View, s: &mut State, rect: Rect) -> Out {
     let list = Rect::from_min_max(pos2(inner.min.x, header.max.y + 2.0 * SP), pos2(inner.max.x, foot.min.y - SP));
 
     ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
-        if !s.threads_loaded {
+        let offline_copy = !s.threads_loaded && !s.threads.is_empty();
+        if offline_copy {
+            ui.label(dim(&t, "Offline copy · read-only until the engine is back"));
+        }
+        if !s.threads_loaded && !offline_copy {
             ui.add_space(3.0 * SP);
             match &s.conn {
                 Conn::Online { .. } => {
@@ -126,7 +130,13 @@ pub fn show(ui: &mut Ui, v: &mut View, s: &mut State, rect: Rect) -> Out {
                 if resp.clicked() && !s.show_trash {
                     pick = Some(th.id.clone());
                 }
+                // offline rows are a cached copy: no actions that would silently no-op
+                let resp = if s.client.is_some() { resp } else { resp.on_hover_text("Offline copy") };
                 resp.context_menu(|ui| {
+                    if s.client.is_none() {
+                        ui.label(dim(&t, "Engine offline"));
+                        return;
+                    }
                     if s.show_trash {
                         if ui.button("Restore").clicked() {
                             act = Some((th.id.clone(), Act::Restore));

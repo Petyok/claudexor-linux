@@ -77,7 +77,7 @@ pub struct Problem {
 
 // ---- threads ---------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
     pub id: String,
@@ -211,8 +211,12 @@ pub struct RunResult {
     pub kind: Option<String>,
     #[serde(default)]
     pub diff_stat: Option<DiffStat>,
+    /// not_applied | applied | applied_review_blocked | reverted | discarded
     #[serde(default)]
     pub apply_state: Option<String>,
+    /// A Revert MAY be offered; the server re-checks divergence when asked.
+    #[serde(default)]
+    pub revertable: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -686,6 +690,257 @@ pub struct RunDetail {
     pub plan_progress: Option<PlanProgress>,
     #[serde(default, deserialize_with = "lossy")]
     pub timeline: Vec<TimelineEvent>,
+    /// The delivery gate's verdict; None when there is no patch.
+    #[serde(default)]
+    pub apply_eligibility: Option<ApplyEligibility>,
+    #[serde(default, deserialize_with = "lossy")]
+    pub required_actions: Vec<RequiredAction>,
+    /// A recorded accept_risk / override decision (hash-bound to the patch).
+    #[serde(default)]
+    pub operator_decision: Option<Value>,
+    #[serde(default)]
+    pub work_product: Option<WorkProduct>,
+    #[serde(default)]
+    pub final_summary: Option<String>,
+}
+
+impl RunDetail {
+    /// Blocked on a human: review findings or a missing operator decision.
+    pub fn needs_decision(&self) -> bool {
+        let by_action = self.required_actions.iter().any(|a| matches!(a.id.as_str(), "resolve_review_block" | "record_operator_decision"));
+        let by_gate = self.apply_eligibility.as_ref().is_some_and(|e| !e.eligible && e.required_action.as_deref() == Some("decision"));
+        self.operator_decision.is_none() && (by_action || by_gate)
+    }
+
+    pub fn has_patch(&self) -> bool {
+        self.work_product.as_ref().is_some_and(|w| w.kind == "patch")
+            || self.summary.result.as_ref().is_some_and(|r| r.kind.as_deref() == Some("patch"))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyEligibility {
+    #[serde(default)]
+    pub eligible: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub required_action: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RequiredAction {
+    pub id: String,
+    #[serde(default)]
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkProduct {
+    /// patch | new_repo | report | files
+    #[serde(default)]
+    pub kind: String,
+}
+
+/// `POST runs/:id/apply` → `ControlDeliveryResponse` (the fields we show).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Delivery {
+    #[serde(default)]
+    pub applied: bool,
+    #[serde(default)]
+    pub refused: bool,
+    #[serde(default)]
+    pub already_applied: bool,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub applied_paths: Vec<String>,
+}
+
+impl Delivery {
+    pub fn describe(&self) -> String {
+        let what = if self.already_applied {
+            "Already applied".to_string()
+        } else if self.applied {
+            match &self.branch {
+                Some(b) => format!("Applied on branch {b}"),
+                None => format!("Applied {} file{}", self.applied_paths.len(), if self.applied_paths.len() == 1 { "" } else { "s" }),
+            }
+        } else {
+            "Not applied".into()
+        };
+        match &self.detail {
+            Some(d) if !d.is_empty() => format!("{what} · {d}"),
+            _ => what,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ThreadApplyResponse {
+    #[serde(default)]
+    pub applied: bool,
+    /// applied | branched | committed | pr_opened | empty | conflict | rejected
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionResponse {
+    #[serde(default)]
+    pub accepted: bool,
+    /// applied | requeued | rejected | unsupported | discarded
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub new_run_id: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArtifactList {
+    #[serde(default, deserialize_with = "lossy")]
+    pub artifacts: Vec<ArtifactInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArtifactInfo {
+    pub path: String,
+    /// file | directory
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub bytes: Option<u64>,
+    #[serde(default)]
+    pub mime: Option<String>,
+}
+
+// ---- settings ------------------------------------------------------------------
+
+/// `GET /v2/settings`. Writes go through `POST /v2/settings` as single-key
+/// partial patches (absent = keep, explicit null = clear), built in place.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    #[serde(default)]
+    pub routing: Routing,
+    #[serde(default)]
+    pub budget: BudgetSettings,
+    #[serde(default)]
+    pub interaction_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub runtime: Option<RuntimeSettings>,
+    #[serde(default)]
+    pub harnesses: BTreeMap<String, HarnessSettings>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Routing {
+    #[serde(default)]
+    pub primary_harness: Option<String>,
+    #[serde(default)]
+    pub eligible_harnesses: Vec<String>,
+    /// mirror_native | clean
+    #[serde(default)]
+    pub env_inheritance: Option<String>,
+    /// subscription | api_key | auto
+    #[serde(default)]
+    pub auth_preference: Option<String>,
+    /// auto | quality | economy
+    #[serde(default)]
+    pub goal: Option<String>,
+    /// never | when_unavailable | allowed_within_cap
+    #[serde(default)]
+    pub paid_fallback: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetSettings {
+    /// `{"kind":"unlimited"}` | `{"kind":"finite","maxUsd":N}`
+    #[serde(default)]
+    pub paid_budget_per_run: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeSettings {
+    #[serde(default)]
+    pub concurrency: Option<ConcurrencyState>,
+}
+
+/// Read-only: configured in the config file, effective after a restart.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConcurrencyState {
+    pub configured: Concurrency,
+    pub effective: Concurrency,
+    #[serde(default)]
+    pub restart_required: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Concurrency {
+    #[serde(default)]
+    pub max_concurrent: u32,
+    #[serde(default)]
+    pub max_parallel_candidates: u32,
+    #[serde(default)]
+    pub max_deep_scan_width: u32,
+    #[serde(default)]
+    pub max_council_members: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessSettings {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub web: Option<String>,
+    #[serde(default)]
+    pub auth_preference: Option<String>,
+    #[serde(default)]
+    pub fallback_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecretList {
+    #[serde(default, deserialize_with = "lossy")]
+    pub secrets: Vec<Secret>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Secret {
+    pub name: String,
+    #[serde(default)]
+    pub present: bool,
+}
+
+/// The API-key slot a harness family reads (Mac `managedSecretSlot`).
+pub fn secret_slot(harness: &str) -> Option<&'static str> {
+    Some(match harness {
+        "codex" => "openai",
+        "claude" => "anthropic",
+        "cursor" => "cursor",
+        "opencode" => "opencode",
+        "raw-api" | "raw" => "raw",
+        "openrouter" => "openrouter",
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -848,6 +1103,8 @@ pub struct RunSummary {
     /// Requested vs stream-observed model (verified only on observed evidence).
     #[serde(default)]
     pub route: Option<RunRoute>,
+    #[serde(default)]
+    pub result: Option<RunResult>,
     #[serde(default)]
     pub requested_access: Option<String>,
     #[serde(default)]
@@ -1024,6 +1281,40 @@ pub struct Harness {
     pub setup_login: Option<SetupLogin>,
     #[serde(default)]
     pub delegation: Option<Delegation>,
+    /// Harness Doctor rows: binary / auth / smoke / model / probe checks.
+    #[serde(default, deserialize_with = "lossy")]
+    pub readiness: Vec<ReadinessRow>,
+    #[serde(default, deserialize_with = "lossy")]
+    pub auth_sources: Vec<AuthSource>,
+    /// Intents this harness can be routed for now; empty = not usable yet.
+    #[serde(default)]
+    pub routable_intents: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReadinessRow {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    /// pass | fail | skip
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthSource {
+    pub source: String,
+    /// available | unavailable | unknown
+    #[serde(default)]
+    pub availability: String,
+    /// passed | failed | not_run
+    #[serde(default)]
+    pub verification: String,
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// Engine-owned Delegate capability for one harness.
@@ -1063,6 +1354,33 @@ impl Harness {
 
     pub fn browser_tool(&self) -> bool {
         self.manifest.as_ref().and_then(|m| m.capabilities.as_ref()).and_then(|c| c.browser_tool).unwrap_or(false)
+    }
+
+    /// Doctor rows as shown: de-duplicated by title, and an ABSENT optional
+    /// API-key fallback reads neutral rather than a red failure (Mac QA-005):
+    /// when the family's key source is unavailable + not_run, `stored_key: fail`
+    /// only means "not configured". A present-but-broken key still fails.
+    pub fn doctor_rows(&self) -> Vec<ReadinessRow> {
+        let fallback = match self.id.as_str() {
+            "codex" => Some("provider_auth_file"),
+            id if secret_slot(id).is_some() => Some("api_key_env"),
+            _ => None,
+        };
+        let key_absent = fallback.is_some_and(|src| {
+            self.auth_sources.iter().any(|a| a.source == src && a.availability == "unavailable" && a.verification == "not_run")
+        });
+        let mut seen = std::collections::HashSet::new();
+        self.readiness
+            .iter()
+            .filter(|r| seen.insert(r.title.clone()))
+            .map(|r| {
+                if key_absent && r.id == "stored_key" && r.status == "fail" {
+                    ReadinessRow { status: "skip".into(), detail: Some("not configured (optional API-key fallback)".into()), ..r.clone() }
+                } else {
+                    r.clone()
+                }
+            })
+            .collect()
     }
 
     pub fn can_delegate(&self) -> bool {
@@ -1606,6 +1924,43 @@ mod plan_tests {
         let claude = list.harnesses.iter().find(|h| h.id == "claude").expect("claude row survives lossy decode");
         assert!(claude.can_delegate() && claude.browser_tool());
         assert!(!list.harnesses.iter().find(|h| h.id == "codex").unwrap().can_delegate());
+    }
+
+    #[test]
+    fn settings_and_doctor_decode() {
+        let v: Value = serde_json::from_str(include_str!("../tests/fixtures/settings-snapshot-maximal.json")).unwrap();
+        let st: Settings = serde_json::from_value(v.get("value").cloned().unwrap_or(v)).unwrap();
+        assert_eq!((st.routing.goal.as_deref(), st.routing.primary_harness.as_deref()), (Some("quality"), Some("codex")));
+        assert_eq!(st.budget.paid_budget_per_run.unwrap()["maxUsd"], 4);
+        let c = st.runtime.unwrap().concurrency.unwrap();
+        assert!(c.restart_required && c.configured.max_concurrent == 48 && c.effective.max_concurrent == 24);
+        assert_eq!(st.harnesses["codex"].default_model.as_deref(), Some("gpt-5.6-sol"));
+        let list: HarnessList = serde_json::from_str(include_str!("../tests/fixtures/live/harnesses.json")).unwrap();
+        let claude = list.harnesses.iter().find(|h| h.id == "claude").unwrap();
+        assert!(!claude.routable_intents.is_empty() && claude.readiness[0].status == "pass");
+        assert_eq!(claude.auth_sources[0].availability, "available");
+        assert_eq!(secret_slot("claude"), Some("anthropic"));
+        // absent optional key: neutral, and the duplicate "Native session" row folds away
+        let rows = claude.doctor_rows();
+        let key = rows.iter().find(|r| r.id == "stored_key").unwrap();
+        assert_eq!(key.status, "skip");
+        assert_eq!(rows.iter().filter(|r| r.title == "Native session").count(), 1);
+    }
+
+    #[test]
+    fn decision_gating() {
+        let base: Value = serde_json::from_str(include_str!("../tests/fixtures/live/run.run-3a038adcb248.json")).unwrap();
+        let mut v = base.clone();
+        v["applyEligibility"] = serde_json::from_str(include_str!("../tests/fixtures/apply-eligibility-no.json")).unwrap();
+        let v2 = v["applyEligibility"].get("value").cloned();
+        if let Some(x) = v2 {
+            v["applyEligibility"] = x;
+        }
+        let d: RunDetail = serde_json::from_value(v.clone()).unwrap();
+        assert!(d.needs_decision(), "review-blocked patch needs a human");
+        v["operatorDecision"] = serde_json::json!({"action": "accept_risk", "decidedAt": null});
+        assert!(!serde_json::from_value::<RunDetail>(v).unwrap().needs_decision(), "a recorded decision unblocks");
+        assert!(!serde_json::from_value::<RunDetail>(base).unwrap().needs_decision());
     }
 
 }

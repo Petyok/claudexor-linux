@@ -71,6 +71,8 @@ struct App {
     accounts_open: bool,
     accounts_opened_at: u64,
     accounts_anchor: egui::Pos2,
+    settings_open: bool,
+    settings_tab: ui::settings::Tab,
     stats: Option<ui::stats::FrameStats>,
     last_frame: std::time::Instant,
 }
@@ -109,6 +111,8 @@ impl App {
             prefs,
             applied_dark: None,
             accounts_open: false,
+            settings_open: false,
+            settings_tab: Default::default(),
             accounts_opened_at: 0,
             accounts_anchor: egui::Pos2::ZERO,
             stats: ui::stats::FrameStats::enabled().then(Default::default),
@@ -274,6 +278,11 @@ impl eframe::App for App {
                 self.applied_dark = None;
             }
             ui.separator();
+            if ui.button("Settings…").clicked() {
+                self.settings_open = true;
+                self.state.load_settings();
+                ui.close();
+            }
             if ui.button("Accounts & quota").clicked() {
                 self.accounts_open = true;
                 self.accounts_opened_at = ctx.cumulative_frame_nr();
@@ -316,6 +325,17 @@ impl eframe::App for App {
             });
         }
 
+        // onboarding's "Set up an account" opens the accounts popover
+        if std::mem::take(&mut self.state.want_accounts) {
+            self.accounts_open = true;
+            self.accounts_opened_at = ctx.cumulative_frame_nr();
+            self.accounts_anchor = side_out.accounts_anchor.left_top() + vec2(0.0, -SP);
+            self.state.refresh_quota(false);
+        }
+        if self.settings_open {
+            let mut view = View { glass: &self.glass, md: &mut self.md, t };
+            self.settings_open = ui::settings::show(&ctx, &mut view, &mut self.state, &mut self.settings_tab);
+        }
         if self.accounts_open {
             let mut view = View { glass: &self.glass, md: &mut self.md, t };
             let keep = ui::accounts::show(&ctx, &mut view, &mut self.state, self.accounts_anchor);

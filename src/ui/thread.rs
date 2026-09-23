@@ -10,9 +10,9 @@ use super::glass::Kind;
 use super::theme::{MEASURE, R_MD, R_SM, SP, T_BODY, T_SMALL, T_TITLE, Theme, semibold, span};
 use super::{View, chip, dim, last_rect, store_rect};
 use crate::model::{Answer, Interaction, RunDetail, Turn};
-use crate::state::{AnswerState, Conn, State, failure_line};
+use crate::state::{AnswerState, Conn, Fetch, State, failure_line};
 use crate::transcript::{Block, ToolStatus};
-use egui::{Align, Color32, Frame, Id, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, Ui, UiBuilder};
+use egui::{Align, Color32, Frame, Id, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, UiBuilder};
 use std::collections::HashMap;
 
 /// UI-local drafts for interactive answers: (interaction, question) → (picked, free text).
@@ -23,6 +23,10 @@ pub struct Drafts {
     pub plan: HashMap<(String, String), (Vec<String>, String)>,
     /// Plan runs whose answers were just sent (until the follow-up turn shows up).
     pub plan_sent: std::collections::HashSet<String>,
+    /// Decision-bar text per run (accepted risk or rerun feedback).
+    pub decision: HashMap<String, String>,
+    /// Runs whose "Override needs-human" was clicked once (awaiting the confirm).
+    pub override_armed: std::collections::HashSet<String>,
 }
 
 const MAX_ROWS: usize = 80;
@@ -66,6 +70,21 @@ fn body(ui: &mut Ui, v: &mut View, s: &mut State, drafts: &mut Drafts, t: &Theme
                 false,
             );
         }
+        (Conn::Online { .. }, false) if !s.harnesses.is_empty() && s.harnesses.iter().all(|h| h.routable_intents.is_empty()) => {
+            empty(
+                ui,
+                v,
+                "Set up a harness first",
+                "No harness is signed in and ready to take a turn yet. Sign in to Claude, Codex, Cursor or another installed harness, and the composer comes alive.",
+                false,
+            );
+            ui.vertical_centered(|ui| {
+                if ui.button("Set up an account").clicked() {
+                    s.want_accounts = true;
+                }
+            });
+            return;
+        }
         (_, false) => {
             let hint = match s.composer.project.as_deref() {
                 Some(root) => format!("New thread in {root}. Ask, plan, or let an agent work."),
@@ -93,6 +112,9 @@ fn body(ui: &mut Ui, v: &mut View, s: &mut State, drafts: &mut Drafts, t: &Theme
         meta.push(m.replace('_', "-"));
     }
     ui.label(dim(t, meta.join(" · ")));
+    if detail.thread.workspace_mode.as_deref() == Some("isolated") && detail.turns.iter().any(|x| x.run.as_ref().is_some_and(|r| r.mode.as_deref() == Some("agent"))) {
+        apply_thread_bar(ui, v, s, &detail.thread.id);
+    }
     ui.add_space(4.0 * SP);
     if detail.turns.is_empty() {
         ui.label(dim(t, "No turns yet."));
@@ -271,6 +293,17 @@ fn turn_card(
             }
             if open {
                 run_details(ui, v, &d, turn);
+            }
+            if d.has_patch() || d.summary.result.as_ref().is_some_and(|r| r.revertable) {
+                workspace(ui, v, s, drafts, &d, turn);
+            }
+            if terminal && turn.run.as_ref().is_some_and(|r| r.mode.as_deref() == Some("agent")) {
+                outputs(ui, v, s, turn);
+            }
+        }
+        if let Some(l) = s.live_of(turn) {
+            for n in &l.notes {
+                ui.label(RichText::new(format!("↻ {n}")).size(T_SMALL).color(t.needs_you));
             }
         }
         // 4. activity transcript
@@ -1002,4 +1035,244 @@ fn run_details(ui: &mut Ui, v: &View, d: &RunDetail, turn: &Turn) {
             }
         }
     });
+}
+
+/// Isolated thread: deliver the worktree's cumulative diff into the project.
+fn apply_thread_bar(ui: &mut Ui, v: &View, s: &mut State, thread_id: &str) {
+    let t = v.t;
+    ui.horizontal_wrapped(|ui| {
+        match s.thread_apply.get(thread_id) {
+            Some(Fetch::Ready(line)) => {
+                ui.label(RichText::new(format!("✔ {line}")).size(T_SMALL).color(t.success));
+            }
+            Some(Fetch::Loading) => {
+                ui.spinner();
+                ui.label(dim(&t, "Applying the thread…"));
+            }
+            other => {
+                if let Some(Fetch::Failed(e)) = other {
+                    ui.label(RichText::new(e.clone()).size(T_SMALL).color(t.failed));
+                }
+                let online = s.client.is_some();
+                if ui.add_enabled(online, egui::Button::new(RichText::new("Apply thread").size(T_SMALL).color(t.on_accent)).fill(t.accent_solid))
+                    .on_hover_text("Merge this thread's isolated worktree changes into the project")
+                    .clicked()
+                {
+                    s.apply_thread(thread_id, "apply");
+                }
+                if ui.add_enabled(online, egui::Button::new(RichText::new("As branch").size(T_SMALL))).on_hover_text("Deliver the changes as a new git branch").clicked() {
+                    s.apply_thread(thread_id, "branch");
+                }
+            }
+        }
+    });
+}
+
+/// Changes of one run: diff, Apply / Revert, and the decision bar when blocked.
+fn workspace(ui: &mut Ui, v: &View, s: &mut State, drafts: &mut Drafts, d: &RunDetail, turn: &Turn) {
+    let t = v.t;
+    let Some(rid) = d.summary.run_id.clone().or_else(|| turn.run_id.clone()) else { return };
+    let result = d.summary.result.clone().or_else(|| turn.run.as_ref().and_then(|r| r.result.clone()));
+    let apply_state = result.as_ref().and_then(|r| r.apply_state.clone()).unwrap_or_else(|| "not_applied".into());
+    let key = format!("changes:{}", turn.id);
+    let open = s.expanded.contains(&key);
+    ui.add_space(SP / 2.0);
+    ui.horizontal_wrapped(|ui| {
+        let stat = result.as_ref().and_then(|r| r.diff_stat.as_ref()).map(|x| format!(" · {} files +{} −{}", x.files, x.additions, x.deletions)).unwrap_or_default();
+        let word = match apply_state.as_str() {
+            "applied" => " · applied",
+            "applied_review_blocked" => " · applied, review blocked",
+            "reverted" => " · reverted",
+            "discarded" => " · discarded",
+            _ => "",
+        };
+        let r = ui.add(egui::Button::new(dim(&t, format!("{} Changes{stat}{word}", if open { "▼" } else { "▶" }))).frame(false));
+        if r.on_hover_text("Show the patch").clicked() && !s.expanded.remove(&key) {
+            s.expanded.insert(key.clone());
+        }
+    });
+    if open {
+        s.load_diff(&rid);
+        match s.diffs.get(&rid) {
+            Some(Fetch::Ready(text)) if text.trim().is_empty() => {
+                ui.label(dim(&t, "No patch file for this run."));
+            }
+            Some(Fetch::Ready(text)) => diff_view(ui, &t, text),
+            Some(Fetch::Failed(e)) => {
+                ui.label(RichText::new(format!("Could not load the patch: {e}")).size(T_SMALL).color(t.failed));
+            }
+            _ => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(dim(&t, "Loading patch…"));
+                });
+            }
+        }
+    }
+
+    let busy = s.run_busy.contains(&rid);
+    let online = s.client.is_some() && !busy;
+    let eligible = d.apply_eligibility.as_ref().is_some_and(|e| e.eligible);
+    let revertable = result.as_ref().is_some_and(|r| r.revertable) && !matches!(apply_state.as_str(), "reverted" | "discarded");
+    ui.horizontal_wrapped(|ui| {
+        if eligible && apply_state == "not_applied" {
+            if ui.add_enabled(online, egui::Button::new(RichText::new("Apply patch").size(T_SMALL).color(t.on_accent)).fill(t.accent_solid)).clicked() {
+                s.apply_run(&rid, "apply");
+            }
+            if ui.add_enabled(online, egui::Button::new(RichText::new("Apply as branch").size(T_SMALL))).clicked() {
+                s.apply_run(&rid, "branch");
+            }
+        } else if let Some(why) = d.apply_eligibility.as_ref().filter(|e| !e.eligible && apply_state == "not_applied").and_then(|e| e.reason.clone()) {
+            ui.label(dim(&t, format!("Apply unavailable: {why}")));
+        }
+        if revertable
+            && ui
+                .add_enabled(online, egui::Button::new(RichText::new("Revert").size(T_SMALL)))
+                .on_hover_text("Restore the project to this run's pre-turn state (the engine refuses if you've edited since)")
+                .clicked()
+        {
+            s.decide(&rid, serde_json::json!({"action": "revert_run"}));
+        }
+        if busy {
+            ui.spinner();
+        }
+    });
+    match s.run_note.get(&rid) {
+        Some(Ok(line)) => {
+            ui.label(RichText::new(format!("✔ {line}")).size(T_SMALL).color(t.success));
+        }
+        Some(Err(e)) => {
+            ui.add(egui::Label::new(RichText::new(e).size(T_SMALL).color(t.failed)).wrap().selectable(true));
+        }
+        None => {}
+    }
+    if d.needs_decision() {
+        decision_bar(ui, v, s, drafts, d, &rid, online);
+    }
+}
+
+/// A blocked run needs a human: accept the risk, rerun with feedback, or override.
+fn decision_bar(ui: &mut Ui, v: &View, s: &mut State, drafts: &mut Drafts, d: &RunDetail, rid: &str, online: bool) {
+    let t = v.t;
+    Frame::new().fill(t.needs_you.gamma_multiply(0.10)).corner_radius(R_SM).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new("Needs your decision").size(T_SMALL).strong().color(t.needs_you));
+        for a in &d.required_actions {
+            if !a.detail.is_empty() {
+                ui.label(dim(&t, format!("• {}", a.detail)));
+            }
+        }
+        let text = drafts.decision.entry(rid.to_string()).or_default();
+        ui.add(TextEdit::multiline(text).hint_text("The risk you accept, or feedback for a rerun").desired_rows(2).desired_width(f32::INFINITY));
+        let has_text = !text.trim().is_empty();
+        let text = text.trim().to_string();
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(online && has_text, egui::Button::new(RichText::new("Accept risk & unblock").size(T_SMALL))).on_disabled_hover_text("Describe the risk you accept first").clicked() {
+                s.decide(rid, serde_json::json!({"action": "accept_risk", "acceptedRisks": [text.clone()]}));
+                drafts.decision.remove(rid);
+            }
+            if ui.add_enabled(online && has_text, egui::Button::new(RichText::new("Rerun with feedback").size(T_SMALL))).on_disabled_hover_text("Write the feedback first").clicked() {
+                s.decide(rid, serde_json::json!({"action": "rerun_with_feedback", "feedback": text.clone()}));
+                drafts.decision.remove(rid);
+            }
+            if drafts.override_armed.contains(rid) {
+                if ui.add_enabled(online, egui::Button::new(RichText::new("Confirm override").size(T_SMALL).color(t.on_accent)).fill(t.failed)).clicked() {
+                    s.decide(rid, serde_json::json!({"action": "override_needs_human"}));
+                    drafts.override_armed.remove(rid);
+                }
+                if ui.button(RichText::new("Cancel").size(T_SMALL)).clicked() {
+                    drafts.override_armed.remove(rid);
+                }
+            } else if ui
+                .add_enabled(online, egui::Button::new(RichText::new("Override needs-human…").size(T_SMALL).color(t.failed)))
+                .on_hover_text("Records an auditable override bound to the current patch. Apply becomes available; a changed patch invalidates it.")
+                .clicked()
+            {
+                drafts.override_armed.insert(rid.to_string());
+            }
+        });
+    });
+}
+
+/// Unified diff on a solid inset: files, hunks, +/− lines, capped for layout cost.
+fn diff_view(ui: &mut Ui, t: &Theme, text: &str) {
+    const MAX_LINES: usize = 600;
+    Frame::new().fill(t.code).corner_radius(R_SM).inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let total = text.lines().count();
+        // ScrollArea's default 64 px minimum clipped short diffs to ~4 lines: size it from the content
+        let line_h = ui.fonts_mut(|f| f.row_height(&egui::FontId::monospace(T_SMALL)));
+        let want = (total.min(MAX_LINES + 1) as f32 * line_h + 4.0).min(420.0);
+        ScrollArea::both().max_height(420.0).min_scrolled_height(want).auto_shrink([false, true]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for line in text.lines().take(MAX_LINES) {
+                let color = if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff ") {
+                    t.text
+                } else if line.starts_with('+') {
+                    t.success
+                } else if line.starts_with('-') {
+                    t.failed
+                } else if line.starts_with("@@") {
+                    t.accent
+                } else {
+                    t.text2
+                };
+                let rt = RichText::new(line).monospace().size(T_SMALL).color(color);
+                ui.add(egui::Label::new(if line.starts_with("diff ") { rt.strong() } else { rt }).extend());
+            }
+            if total > MAX_LINES {
+                ui.label(RichText::new(format!("… {} more lines", total - MAX_LINES)).size(T_SMALL).color(t.text3));
+            }
+        });
+    });
+}
+
+/// Files the run wrote into the project's outputs; Open saves a private copy and hands it to the desktop.
+fn outputs(ui: &mut Ui, v: &View, s: &mut State, turn: &Turn) {
+    let t = v.t;
+    let Some(rid) = turn.run_id.clone() else { return };
+    let key = format!("outputs:{}", turn.id);
+    let open = s.expanded.contains(&key);
+    if !open {
+        if let Some(Fetch::Ready(list)) = s.files.get(&rid) {
+            if list.is_empty() {
+                return; // known empty: no row at all
+            }
+        }
+    }
+    let r = ui.add(egui::Button::new(dim(&t, format!("{} Outputs", if open { "▼" } else { "▶" }))).frame(false));
+    if r.on_hover_text("Files this run produced").clicked() && !s.expanded.remove(&key) {
+        s.expanded.insert(key.clone());
+    }
+    if !open {
+        return;
+    }
+    s.load_files(&rid);
+    let list = match s.files.get(&rid) {
+        Some(Fetch::Ready(list)) => list.clone(),
+        Some(Fetch::Failed(e)) => {
+            ui.label(RichText::new(format!("Could not list outputs: {e}")).size(T_SMALL).color(t.failed));
+            return;
+        }
+        _ => {
+            ui.spinner();
+            return;
+        }
+    };
+    if list.is_empty() {
+        ui.label(dim(&t, "No produced files."));
+    }
+    for a in list {
+        ui.horizontal(|ui| {
+            let image = a.mime.as_deref().is_some_and(|m| m.starts_with("image/") && m != "image/svg+xml");
+            ui.label(RichText::new(if image { "▣" } else { "◇" }).size(T_SMALL).color(t.text3));
+            ui.add(egui::Label::new(RichText::new(&a.path).size(T_SMALL).monospace().color(t.text)).truncate());
+            if let Some(b) = a.bytes {
+                ui.label(dim(&t, format!("{} KB", b.div_ceil(1024))));
+            }
+            if ui.add_enabled(s.client.is_some(), egui::Button::new(RichText::new("Open").size(T_SMALL))).clicked() {
+                s.open_output(&rid, &a.path);
+            }
+        });
+    }
 }

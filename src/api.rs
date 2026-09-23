@@ -320,20 +320,91 @@ impl Client {
 
     /// Raw artifact text (fallback when `primaryOutput.text` is absent).
     pub fn artifact_text(&self, run_id: &str, path: &str) -> Result<String, ApiError> {
+        let bytes = self.run_file(run_id, "artifacts", path, 8 * 1024 * 1024)?;
+        String::from_utf8(bytes).map_err(|_| ApiError::Decode(format!("{path} is not UTF-8 text")))
+    }
+
+    /// One file of a run: `family` is `artifacts` (the run tree) or `produced`
+    /// (outputs written into the project). Capped at `max` bytes.
+    pub fn run_file(&self, run_id: &str, family: &str, path: &str, max: u64) -> Result<Vec<u8>, ApiError> {
         let path: Vec<String> = path.split('/').map(seg).collect();
         let r = self
             .agent
-            .get(self.url(&format!("runs/{}/artifacts/{}", seg(run_id), path.join("/"))))
+            .get(self.url(&format!("runs/{}/{family}/{}", seg(run_id), path.join("/"))))
             .header("Authorization", &self.bearer)
             .header("X-Claudexor-Protocol-Major", "3")
             .call();
         let mut resp = r.map_err(|e| ApiError::Transport(e.to_string()))?;
         let status = resp.status().as_u16();
-        let body = resp.body_mut().read_to_string().map_err(|e| ApiError::Decode(e.to_string()))?;
+        let body = resp.body_mut().with_config().limit(max).read_to_vec().map_err(|e| ApiError::Decode(e.to_string()))?;
         if status != 200 {
-            return Err(ApiError::Http { status, problem: serde_json::from_str(&body).ok(), body });
+            let text = String::from_utf8_lossy(&body).into_owned();
+            return Err(ApiError::Http { status, problem: serde_json::from_str(&text).ok(), body: text });
         }
         Ok(body)
+    }
+
+    pub fn run_files(&self, run_id: &str, family: &str) -> Result<ArtifactList, ApiError> {
+        self.get(&format!("runs/{}/{family}", seg(run_id)))
+    }
+
+    /// Apply a run's patch to the live tree (`mode`: apply | branch).
+    pub fn apply_run(&self, run_id: &str, mode: &str) -> Result<Delivery, ApiError> {
+        self.post(&format!("runs/{}/apply", seg(run_id)), json!({ "mode": mode })).map(|(_, d)| d)
+    }
+
+    /// Apply an isolated thread's cumulative worktree diff.
+    pub fn apply_thread(&self, thread_id: &str, mode: &str) -> Result<ThreadApplyResponse, ApiError> {
+        self.post(&format!("threads/{}/apply", seg(thread_id)), json!({ "mode": mode })).map(|(_, d)| d)
+    }
+
+    /// Operator decision: accept_risk | rerun_with_feedback | override_needs_human | revert_run.
+    pub fn decide(&self, run_id: &str, body: Value) -> Result<DecisionResponse, ApiError> {
+        self.post(&format!("runs/{}/decision", seg(run_id)), body).map(|(_, d)| d)
+    }
+
+    // ---- settings --------------------------------------------------------------------
+
+    pub fn settings(&self) -> Result<Settings, ApiError> {
+        self.get("settings")
+    }
+
+    /// Partial merge: absent keys keep their value, explicit null clears.
+    pub fn update_settings(&self, patch: &Value) -> Result<Settings, ApiError> {
+        self.post("settings", patch).map(|(_, s)| s)
+    }
+
+    /// Harness Doctor recheck: re-probe instead of the cached verdicts.
+    pub fn harnesses_fresh(&self) -> Result<HarnessList, ApiError> {
+        self.get("harnesses?fresh=true")
+    }
+
+    pub fn secrets(&self) -> Result<SecretList, ApiError> {
+        self.get("secrets")
+    }
+
+    /// Store a secret. The value goes out once and is never read back.
+    pub fn set_secret(&self, name: &str, value: &str) -> Result<Value, ApiError> {
+        self.post("secrets", json!({ "name": name, "value": value })).map(|(_, v)| v)
+    }
+
+    pub fn delete_secret(&self, name: &str) -> Result<Value, ApiError> {
+        let r = self
+            .agent
+            .delete(self.url(&format!("secrets/{}", seg(name))))
+            .header("Authorization", &self.bearer)
+            .header("X-Claudexor-Protocol-Major", "3")
+            .header("Idempotency-Key", idempotency_key())
+            .call();
+        Self::finish(r).map(|(_, v)| v)
+    }
+
+    pub fn trust_list(&self) -> Result<TrustList, ApiError> {
+        self.get("trust")
+    }
+
+    pub fn revoke_full_access(&self, root: &str) -> Result<TrustState, ApiError> {
+        self.post("trust", json!({"repoRoot": root, "allowFullAccess": false})).map(|(_, t)| t)
     }
 
     pub fn answer(&self, run_id: &str, interaction_id: &str, answers: &[Answer]) -> Result<(), ApiError> {
