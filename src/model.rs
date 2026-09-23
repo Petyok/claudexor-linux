@@ -73,6 +73,9 @@ pub struct Problem {
     pub error: Option<String>,
     #[serde(default)]
     pub required_actions: Vec<String>,
+    /// Code-specific extras, e.g. `sensitiveClass` on sensitive_file_refused.
+    #[serde(default)]
+    pub context: Option<Value>,
 }
 
 // ---- threads ---------------------------------------------------------------
@@ -91,6 +94,11 @@ pub struct Thread {
     pub workspace_mode: Option<String>,
     #[serde(default)]
     pub primary_harness: Option<String>,
+    /// Sticky per-thread routing: pinned account and write scope.
+    #[serde(default)]
+    pub credential_profile_id: Option<String>,
+    #[serde(default)]
+    pub access: Option<String>,
     /// `active` | `closed`.
     #[serde(default)]
     pub state: Option<String>,
@@ -119,6 +127,20 @@ impl Thread {
 pub struct ThreadList {
     #[serde(default, deserialize_with = "lossy")]
     pub threads: Vec<Thread>,
+    /// Projects the daemon skipped while listing (e.g. `project_root_missing`).
+    #[serde(default, deserialize_with = "lossy")]
+    pub problems: Vec<ListingProblem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListingProblem {
+    pub project_id: String,
+    pub root: String,
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -265,6 +287,21 @@ pub struct CreateThread {
     /// in_place (default) | isolated: a persistent thread worktree.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    /// Sticky account pin and write scope, seeded from the draft composer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_profile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access: Option<String>,
+}
+
+/// The composer's access choice as the wire's static strings.
+pub fn access_str(a: &str) -> Option<&'static str> {
+    Some(match a {
+        "readonly" => "readonly",
+        "workspace_write" => "workspace_write",
+        "full" => "full",
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -333,6 +370,82 @@ pub struct TurnRequest {
     /// subscription | api_key | auto
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_preference: Option<String>,
+    /// Create: typed-argv deterministic gate commands (never a shell string).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<TestCommand>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub protected_path_approvals: Vec<PathApproval>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TestCommand {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PathApproval {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Split one command line into argv: whitespace separates, quotes group,
+/// backslash escapes the next char. No globs, pipes or variables (no shell).
+/// Strict: an unterminated quote or a trailing backslash is an error.
+pub fn parse_argv(line: &str) -> Result<Vec<String>, String> {
+    let (mut out, mut cur, mut have) = (vec![], String::new(), false);
+    let mut quote: Option<char> = None;
+    let mut it = line.chars();
+    while let Some(c) = it.next() {
+        match (quote, c) {
+            (_, '\\') => {
+                cur.push(it.next().ok_or("the command ends with a dangling backslash")?);
+                have = true;
+            }
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => cur.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                have = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if have {
+                    out.push(std::mem::take(&mut cur));
+                    have = false;
+                }
+            }
+            (None, c) => {
+                cur.push(c);
+                have = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err("the command has an unterminated quote".into());
+    }
+    if have {
+        out.push(cur);
+    }
+    Ok(out)
+}
+
+/// `glob[:reason]` rows, comma or newline separated; every row needs a glob.
+pub fn parse_approvals(text: &str) -> Result<Vec<PathApproval>, String> {
+    text.split([',', '\n'])
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(|row| {
+            let (path, reason) = match row.split_once(':') {
+                Some((p, r)) => (p.trim(), Some(r.trim()).filter(|r| !r.is_empty())),
+                None => (row, None),
+            };
+            if path.is_empty() {
+                return Err("each approval needs a non-empty path glob".to_string());
+            }
+            Ok(PathApproval { path: path.into(), reason: reason.map(Into::into) })
+        })
+        .collect()
 }
 
 /// One explicit reviewer: `harness[=model[:effort]]`.
@@ -408,6 +521,10 @@ pub struct TurnOpts {
     pub review: bool,
     /// `harness[=model[:effort]]`, comma separated.
     pub panel: String,
+    /// Create only: one test command line (typed argv).
+    pub test_command: String,
+    /// Protected-path approvals, `glob[:reason]` rows.
+    pub approvals: String,
 }
 
 impl Default for TurnOpts {
@@ -428,6 +545,8 @@ impl Default for TurnOpts {
             auth: None,
             review: false,
             panel: String::new(),
+            test_command: String::new(),
+            approvals: String::new(),
         }
     }
 }
@@ -485,6 +604,13 @@ impl TurnOpts {
                 };
                 req.review = Some(promised_review || self.review || !panel.is_empty());
                 req.reviewer_panel = panel;
+                req.protected_path_approvals = parse_approvals(&self.approvals)?;
+                if self.strategy == Strategy::Create && !self.test_command.trim().is_empty() {
+                    let argv = parse_argv(&self.test_command).map_err(|e| format!("Test command: {e}"))?;
+                    let mut argv = argv.into_iter();
+                    let program = argv.next().ok_or("Test command needs a program name")?;
+                    req.tests = vec![TestCommand { program, args: argv.collect() }];
+                }
             }
             _ => {}
         }
@@ -506,6 +632,8 @@ impl TurnOpts {
                 self.browser,
                 self.review,
                 !self.panel.trim().is_empty(),
+                self.strategy == Strategy::Create && !self.test_command.trim().is_empty(),
+                !self.approvals.trim().is_empty(),
             ],
             _ => vec![],
         };
@@ -542,6 +670,8 @@ impl TurnRequest {
             web: None,
             browser: None,
             auth_preference: None,
+            tests: vec![],
+            protected_path_approvals: vec![],
         }
     }
 }
@@ -1328,6 +1458,55 @@ pub struct Delegation {
     pub requires_full_access: bool,
 }
 
+/// `GET /v2/run-applicability`: which run shapes this repo can take (git gate).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Applicability {
+    pub matrix: ApplicabilityMatrix,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApplicabilityMatrix {
+    pub in_place: ApplicabilityRow,
+    pub isolated: ApplicabilityRow,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApplicabilityRow {
+    pub read_only: Cell,
+    pub agent_convergence: Cell,
+    pub agent_other: Cell,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Cell {
+    #[serde(default = "yes")]
+    pub applicable: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub remediation: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Applicability {
+    /// The cell for one turn (Mac `composerRunApplicabilityShape`): read-only
+    /// access or a non-agent mode → read_only; a repair loop (attempts or
+    /// until-clean on the wire) → agent_convergence; else agent_other.
+    pub fn cell(&self, isolated: bool, req: &TurnRequest, access: &str) -> &Cell {
+        let row = if isolated { &self.matrix.isolated } else { &self.matrix.in_place };
+        if req.mode != "agent" || access == "readonly" {
+            &row.read_only
+        } else if req.until_clean == Some(true) || req.attempts.is_some() {
+            &row.agent_convergence
+        } else {
+            &row.agent_other
+        }
+    }
+}
+
 /// One repo's trust file: the default access profile and the full-access grant.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1664,6 +1843,16 @@ pub struct ProjectList {
 pub struct Project {
     pub id: String,
     pub root: String,
+    /// Registered projects this one sits inside of, or contains.
+    #[serde(default, deserialize_with = "lossy")]
+    pub nesting: Vec<Nesting>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Nesting {
+    /// inside | contains
+    pub relation: String,
+    pub root: String,
 }
 
 #[cfg(test)]
@@ -1961,6 +2150,51 @@ mod plan_tests {
         v["operatorDecision"] = serde_json::json!({"action": "accept_risk", "decidedAt": null});
         assert!(!serde_json::from_value::<RunDetail>(v).unwrap().needs_decision(), "a recorded decision unblocks");
         assert!(!serde_json::from_value::<RunDetail>(base).unwrap().needs_decision());
+    }
+
+    #[test]
+    fn argv_and_approvals_parse_strictly() {
+        assert_eq!(parse_argv(r#"npm run "unit tests" --flag\ x"#).unwrap(), vec!["npm", "run", "unit tests", "--flag x"]);
+        assert_eq!(parse_argv("  cargo   test  ").unwrap(), vec!["cargo", "test"]);
+        assert_eq!(parse_argv("echo ''").unwrap(), vec!["echo", ""]);
+        assert!(parse_argv("sh -c 'oops").is_err());
+        assert!(parse_argv("trailing \\").is_err());
+        assert_eq!(
+            parse_approvals("migrations/**: schema change, .github/*\n").unwrap(),
+            vec![PathApproval { path: "migrations/**".into(), reason: Some("schema change".into()) }, PathApproval { path: ".github/*".into(), reason: None }]
+        );
+        assert!(parse_approvals(":no glob").is_err());
+        let o = TurnOpts { strategy: Strategy::Create, test_command: "cargo test --lib".into(), ..Default::default() };
+        let mut r = TurnRequest::new("p", "agent");
+        o.apply(&mut r, "workspace_write").unwrap();
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!((v["tests"][0]["program"].as_str(), v["tests"][0]["args"][1].as_str()), (Some("cargo"), Some("--lib")));
+        // a stale test command on another strategy never leaks onto the wire
+        let o = TurnOpts { strategy: Strategy::Single, test_command: "cargo test".into(), ..Default::default() };
+        let mut r = TurnRequest::new("p", "agent");
+        o.apply(&mut r, "workspace_write").unwrap();
+        assert!(serde_json::to_value(&r).unwrap().get("tests").is_none());
+    }
+
+    #[test]
+    fn applicability_picks_the_turn_cell() {
+        let cell = |ok: bool| serde_json::json!({"applicable": ok, "requiresGit": !ok, "code": if ok { Value::Null } else { "git_missing".into() }, "reason": if ok { Value::Null } else { "Git is required".into() }, "remediation": "Install git"});
+        let row = |conv: bool, other: bool| serde_json::json!({"read_only": cell(true), "agent_convergence": cell(conv), "agent_other": cell(other)});
+        let a: Applicability = serde_json::from_value(serde_json::json!({"repoRoot": "/r", "git": {"status": "missing"}, "matrix": {"in_place": row(false, true), "isolated": row(false, false)}})).unwrap();
+        let single = {
+            let mut r = TurnRequest::new("p", "agent");
+            TurnOpts::default().apply(&mut r, "workspace_write").unwrap();
+            r
+        };
+        assert!(!a.cell(false, &single, "workspace_write").applicable, "Single sends attempts: a convergence shape");
+        let create = {
+            let mut r = TurnRequest::new("p", "agent");
+            TurnOpts { strategy: Strategy::Create, ..Default::default() }.apply(&mut r, "workspace_write").unwrap();
+            r
+        };
+        assert!(a.cell(false, &create, "workspace_write").applicable);
+        assert!(!a.cell(true, &create, "workspace_write").applicable);
+        assert!(a.cell(true, &TurnRequest::new("p", "ask"), "readonly").applicable);
     }
 
 }

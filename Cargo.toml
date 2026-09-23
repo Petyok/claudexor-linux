@@ -18,6 +18,10 @@ egui_glow = "0.34"
 glow = "0.17"
 # No syntect / image loaders: they cost ~5 MB of binary and tens of MB of RSS (PLAN §7 budgets).
 egui_commonmark = { version = "0.23", default-features = false, features = ["pulldown_cmark"] }
+# Image previews of run outputs: PNG is already linked (clipboard), JPEG is small;
+# no svg/gif/webp/http loaders (binary budget, PLAN §7).
+egui_extras = { version = "0.34", default-features = false, features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 backdrop-blur-egui = { version = "0.2", default-features = false, features = ["grab-pass"] }
 ureq = { version = "3.4", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }

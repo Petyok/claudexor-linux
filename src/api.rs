@@ -543,6 +543,15 @@ impl Client {
         self.post("trust", serde_json::json!({"repoRoot": root, "allowFullAccess": true})).map(|(_, t)| t)
     }
 
+    pub fn run_applicability(&self, root: &str) -> Result<Applicability, ApiError> {
+        self.get(&format!("run-applicability?repoRoot={}", seg(root)))
+    }
+
+    /// Point a registered project at its moved folder.
+    pub fn relink_project(&self, id: &str, root: &str) -> Result<Project, ApiError> {
+        self.post(&format!("projects/{}/relink", seg(id)), json!({ "root": root })).map(|(_, p)| p)
+    }
+
     pub fn projects(&self) -> Result<ProjectList, ApiError> {
         self.get("projects")
     }

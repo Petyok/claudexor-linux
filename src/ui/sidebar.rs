@@ -68,6 +68,26 @@ pub fn show(ui: &mut Ui, v: &mut View, s: &mut State, rect: Rect) -> Out {
             }
             return;
         }
+        // projects the engine had to skip: their threads are hidden until relinked
+        for pr in s.project_problems.clone() {
+            let name = super::basename(&pr.root).to_string();
+            egui::Frame::new().fill(t.blocked.gamma_multiply(0.12)).corner_radius(8).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(egui::Label::new(RichText::new(format!("Threads from “{name}” are hidden: the project folder is missing.")).size(T_SMALL).color(t.text)).wrap())
+                    .on_hover_text(format!("{}\n{}", pr.message, pr.root));
+                let key = ui.id().with(("relink", &pr.project_id));
+                let mut path: String = ui.ctx().data(|d| d.get_temp(key)).unwrap_or_default();
+                ui.horizontal(|ui| {
+                    ui.add(TextEdit::singleline(&mut path).hint_text("new folder path").desired_width(ui.available_width() - 60.0));
+                    if ui.add_enabled(path.starts_with('/') && s.client.is_some(), egui::Button::new("Relink")).clicked() {
+                        s.relink_project(&pr.project_id, &path);
+                        path.clear();
+                    }
+                });
+                ui.ctx().data_mut(|d| d.insert_temp(key, path));
+            });
+            ui.add_space(SP);
+        }
         // search + trash toggle
         let search_id = ui.id().with("thread-search");
         let mut query: String = ui.ctx().data(|d| d.get_temp(search_id)).unwrap_or_default();

@@ -181,6 +181,7 @@ fn harness_pick(ui: &mut Ui, v: &View, s: &mut State) {
         s.composer.model = None;
         s.composer.effort = None;
         s.composer.account = None;
+        s.patch_thread(serde_json::json!({ "primaryHarness": s.composer.harness, "credentialProfileId": null }));
     }
 }
 
@@ -295,6 +296,14 @@ fn input(ui: &mut Ui, v: &View, s: &mut State, inner_w: f32) {
     if s.effective_root().is_none() {
         ui.label(dim(&t, "Pick a project to use Plan and Agent."));
     }
+    // overlapping registered roots keep separate thread/artifact/trust identities (informational)
+    if let Some(p) = s.effective_root().and_then(|r| s.projects.iter().find(|p| p.root == r)) {
+        for n in &p.nesting {
+            let verb = if n.relation == "inside" { "Nested inside" } else { "Contains" };
+            ui.label(dim(&t, format!("{verb} {}", basename(&n.root))))
+                .on_hover_text(format!("{verb} the registered project at {}. Overlapping roots have separate thread, artifact and trust identities.", n.root));
+        }
+    }
 }
 
 /// "Options": every per-turn knob the current mode takes, with a badge counting
@@ -354,7 +363,11 @@ fn agent_options(ui: &mut Ui, v: &View, s: &mut State) {
         _ => "Repo default (workspace write)",
     };
     heading(ui, v, "Access");
+    let before = s.composer.opts.access;
     choice(ui, &mut s.composer.opts.access, &[(None, default_label), (Some("readonly"), "Read-only"), (Some("workspace_write"), "Workspace write"), (Some("full"), "Full")]);
+    if s.composer.opts.access != before {
+        s.patch_thread(serde_json::json!({ "access": s.composer.opts.access }));
+    }
     if s.composer.opts.access == Some("full") && !trust.as_ref().is_some_and(|t| t.allow_full_access) {
         ui.label(RichText::new("Full access runs unsandboxed. It needs a recorded grant for this repo.").size(T_SMALL).color(t.needs_you));
         // Two deliberate steps: the grant button appears under the pointer when the
@@ -440,6 +453,14 @@ fn agent_options(ui: &mut Ui, v: &View, s: &mut State) {
     }
     ui.add(TextEdit::singleline(&mut o.panel).hint_text("reviewers: codex=gpt-5:high, claude").desired_width(280.0))
         .on_hover_text("Explicit reviewer panel: harness[=model[:effort]], comma separated");
+    if o.strategy == Strategy::Create {
+        heading(ui, v, "Test command");
+        ui.add(TextEdit::singleline(&mut o.test_command).hint_text("e.g. npm test").desired_width(280.0))
+            .on_hover_text("A deterministic gate run after the candidate. Typed argv: quotes group words, no shell, pipes or variables.");
+    }
+    heading(ui, v, "Protected-path approvals");
+    ui.add(TextEdit::multiline(&mut o.approvals).hint_text("glob[:reason], one per line").desired_rows(1).desired_width(280.0))
+        .on_hover_text("Paths this turn may change although they are protected (auto-protected gate/test paths only)");
 }
 
 /// Model chips for one pooled harness (its truth-source list only).
@@ -504,6 +525,7 @@ fn account_pin(ui: &mut Ui, v: &View, s: &mut State) {
         .and_then(|id| rows.iter().find(|r| &r.0 == id))
         .map(|r| r.1.clone())
         .unwrap_or_else(|| "Automatic".into());
+    let before = s.composer.account.clone();
     drop_up(ui, ("account", &h), RichText::new(cur).size(T_SMALL), 110.0, false, |ui| {
         ui.selectable_value(&mut s.composer.account, None, "Automatic")
             .on_hover_text("Route through the quota-aware pool of enabled accounts");
@@ -512,6 +534,9 @@ fn account_pin(ui: &mut Ui, v: &View, s: &mut State) {
             ui.selectable_value(&mut s.composer.account, Some(id.clone()), text);
         }
     });
+    if s.composer.account != before {
+        s.patch_thread(serde_json::json!({ "primaryHarness": h, "credentialProfileId": s.composer.account }));
+    }
 }
 
 /// Attach (file chooser) · Capture (screen region) · removable chips with

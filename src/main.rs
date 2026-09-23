@@ -80,6 +80,8 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install_fonts(&cc.egui_ctx);
+        // decodes run-output previews handed over as bytes (PNG/JPEG only)
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         let prefs = Prefs::load();
         let (frost, refract) = match cc.gl.as_ref() {
             Some(gl) => {
@@ -332,6 +334,10 @@ impl eframe::App for App {
             self.accounts_anchor = side_out.accounts_anchor.left_top() + vec2(0.0, -SP);
             self.state.refresh_quota(false);
         }
+        {
+            let mut view = View { glass: &self.glass, md: &mut self.md, t };
+            ui::thread::viewer(&ctx, &mut view, &mut self.state);
+        }
         if self.settings_open {
             let mut view = View { glass: &self.glass, md: &mut self.md, t };
             self.settings_open = ui::settings::show(&ctx, &mut view, &mut self.state, &mut self.settings_tab);
@@ -455,6 +461,8 @@ fn send(prompt: &str) -> Result<(), String> {
             mode: Some("ask".into()),
             primary_harness: None,
             workspace: None,
+            credential_profile_id: None,
+            access: None,
         })
         .map_err(|e| e.to_string())?;
     println!("thread {}", th.id);

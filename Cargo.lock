@@ -590,8 +590,10 @@ dependencies = [
  "eframe",
  "egui",
  "egui_commonmark",
+ "egui_extras",
  "egui_glow",
  "glow",
+ "image",
  "libc",
  "serde",
  "serde_json",
@@ -961,6 +963,7 @@ dependencies = [
  "ahash",
  "egui",
  "enum-map",
+ "image",
  "log",
  "profiling",
 ]
@@ -1569,6 +1572,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

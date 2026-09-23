@@ -78,17 +78,44 @@ pub enum Msg {
     LoginSnap(Result<SetupSnapshot, ApiError>),
     LoginInput(Result<SetupJob, ApiError>),
     Trust(String, Result<Option<TrustState>, ApiError>),
+    Applicability(String, Result<Applicability, ApiError>),
     Diff(String, Result<String, ApiError>),
     Files(String, Result<ArtifactList, ApiError>),
     /// A workspace action on a run finished: (run, outcome line or error).
     RunAction(String, Result<String, String>),
     ThreadApplied(String, Result<ThreadApplyResponse, ApiError>),
     FileSaved(Result<std::path::PathBuf, String>),
+    Preview(String, Result<Preview, String>),
     Settings(Result<Settings, ApiError>),
     SettingsSaved(Result<Settings, ApiError>),
     Secrets(Result<SecretList, ApiError>),
     SecretChanged(&'static str, Result<(), ApiError>),
     TrustList(Result<TrustList, ApiError>),
+}
+
+/// A produced file loaded for in-app viewing.
+#[derive(Clone)]
+pub enum Preview {
+    Image(Arc<[u8]>),
+    Text(String),
+}
+
+/// What an output is, by MIME type first, then extension (Mac `ArtifactCategory`).
+pub fn output_kind(path: &str, mime: Option<&str>) -> Option<&'static str> {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match mime {
+        Some("image/png" | "image/jpeg") => return Some("image"),
+        Some(m) if m.starts_with("image/") => return None, // svg/gif/webp: no decoder, Open instead
+        Some(m) if m.starts_with("text/") || matches!(m, "application/json" | "application/x-yaml" | "application/yaml") => return Some("text"),
+        _ => {}
+    }
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" => Some("image"),
+        "md" | "txt" | "log" | "json" | "yaml" | "yml" | "toml" | "csv" | "diff" | "patch" | "rs" | "py" | "js" | "ts" | "sh" | "html" | "css" | "xml" => {
+            Some("text")
+        }
+        _ => None,
+    }
 }
 
 /// A value fetched on demand for the UI.
@@ -238,6 +265,15 @@ pub struct State {
     pub run_busy: HashSet<String>,
     pub run_note: HashMap<String, Result<String, String>>,
     pub thread_apply: HashMap<String, Fetch<String>>,
+    /// In-app previews of produced files, keyed `run \0 path`.
+    pub previews: HashMap<String, Fetch<Preview>>,
+    /// The output open in the viewer: (run, path).
+    pub viewing: Option<(String, String)>,
+    /// Thread view: conversation (false) or the workspace panel (true),
+    /// its tab (0 changes, 1 outputs, 2 evidence) and a one-run filter.
+    pub ws_open: bool,
+    pub ws_tab: u8,
+    pub ws_run: Option<String>,
     /// Settings screen data (loaded when it opens).
     pub settings: Option<Fetch<Settings>>,
     pub settings_note: Option<Result<String, String>>,
@@ -255,6 +291,8 @@ pub struct State {
 
     pub harnesses: Vec<Harness>,
     pub models: HashMap<String, Result<ModelList, String>>,
+    /// Which run shapes each repo can take (git gate), by root.
+    pub applicability: HashMap<String, Applicability>,
     /// Repo trust by root: Ok(None) = no trust file (engine defaults).
     pub trust: HashMap<String, Result<Option<TrustState>, String>>,
     pub quota: Option<Quota>,
@@ -262,6 +300,8 @@ pub struct State {
     pub quota_loading: bool,
     pub pools: Vec<AccountPool>,
     pub projects: Vec<Project>,
+    /// Projects hidden from the thread list (folder missing), with relink.
+    pub project_problems: Vec<ListingProblem>,
 
     pub composer: Composer,
     pub error: Option<String>,
@@ -321,6 +361,7 @@ impl State {
             stale,
             // shown read-only until the engine answers (then replaced + re-saved)
             threads: load_thread_cache(),
+            project_problems: vec![],
             threads_loaded: false,
             selected: None,
             detail: None,
@@ -338,12 +379,18 @@ impl State {
             harnesses: vec![],
             models: HashMap::new(),
             trust: HashMap::new(),
+            applicability: HashMap::new(),
             detail_at: HashMap::new(),
             diffs: HashMap::new(),
             files: HashMap::new(),
             run_busy: HashSet::new(),
             run_note: HashMap::new(),
             thread_apply: HashMap::new(),
+            previews: HashMap::new(),
+            viewing: None,
+            ws_open: false,
+            ws_tab: 0,
+            ws_run: None,
             settings: None,
             settings_note: None,
             secrets: None,
@@ -485,6 +532,8 @@ impl State {
         if self.trust.contains_key(root) || self.client.is_none() {
             return;
         }
+        let r = root.to_string();
+        self.spawn(move |c| Msg::Applicability(r.clone(), c.run_applicability(&r)));
         self.trust.insert(root.to_string(), Err("loading…".into()));
         let r = root.to_string();
         self.spawn(move |c| Msg::Trust(r.clone(), c.trust(&r)));
@@ -520,7 +569,16 @@ impl State {
             return Some(e);
         }
         let ungranted = mode == "agent" && self.composer.opts.access == Some("full") && !self.repo_trust().is_some_and(|t| t.allow_full_access);
-        ungranted.then(|| "Full access needs a grant for this repo (Options)".into())
+        if ungranted {
+            return Some("Full access needs a grant for this repo (Options)".into());
+        }
+        // git gate: the engine's own verdict for this exact turn shape
+        let isolated = match &self.detail {
+            Some(d) if self.selected.is_some() => d.thread.workspace_mode.as_deref() == Some("isolated"),
+            _ => self.composer.isolated,
+        };
+        let cell = self.effective_root().and_then(|r| self.applicability.get(&r)).map(|a| a.cell(isolated, &probe, self.effective_access()))?;
+        (!cell.applicable).then(|| [cell.reason.clone(), cell.remediation.clone()].into_iter().flatten().collect::<Vec<_>>().join(" "))
     }
 
     // ---- workspace: changes, apply, decisions, outputs --------------------------
@@ -585,11 +643,36 @@ impl State {
         self.spawn(move |c| Msg::ThreadApplied(t.clone(), c.apply_thread(&t, mode)));
     }
 
+    pub fn preview_key(run_id: &str, path: &str) -> String {
+        format!("{run_id}\0{path}")
+    }
+
+    /// Fetch a produced file for in-app viewing (images ≤ 16 MB, text ≤ 1 MB).
+    pub fn load_preview(&mut self, run_id: &str, path: &str, kind: &'static str) {
+        let key = Self::preview_key(run_id, path);
+        if self.previews.contains_key(&key) {
+            return;
+        }
+        self.previews.insert(key.clone(), Fetch::Loading);
+        let (r, p) = (run_id.to_string(), path.to_string());
+        self.spawn(move |c| {
+            let max = if kind == "image" { 16 << 20 } else { 1 << 20 };
+            let res = c.run_file(&r, "produced", &p, max).map_err(|e| file_error(&e)).and_then(|bytes| {
+                if kind == "image" {
+                    Ok(Preview::Image(bytes.into()))
+                } else {
+                    String::from_utf8(bytes).map(Preview::Text).map_err(|_| "not UTF-8 text".into())
+                }
+            });
+            Msg::Preview(key.clone(), res)
+        });
+    }
+
     /// Save one produced output to the cache dir (owner-only) and open it.
     pub fn open_output(&mut self, run_id: &str, path: &str) {
         let (r, p) = (run_id.to_string(), path.to_string());
         self.spawn(move |c| {
-            let saved = c.run_file(&r, "produced", &p, 64 * 1024 * 1024).map_err(|e| e.to_string()).and_then(|bytes| save_output(&r, &p, &bytes));
+            let saved = c.run_file(&r, "produced", &p, 64 * 1024 * 1024).map_err(|e| file_error(&e)).and_then(|bytes| save_output(&r, &p, &bytes));
             Msg::FileSaved(saved)
         });
     }
@@ -633,6 +716,11 @@ impl State {
         });
     }
 
+    pub fn relink_project(&mut self, id: &str, root: &str) {
+        let (i, r) = (id.to_string(), root.trim_end_matches('/').to_string());
+        self.spawn(move |c| Msg::Acked("Relink project", c.relink_project(&i, &r).map(drop)));
+    }
+
     /// Harness Doctor "Recheck": re-probe every harness.
     pub fn recheck_harnesses(&mut self) {
         self.spawn(|c| Msg::Harnesses(c.harnesses_fresh()));
@@ -644,6 +732,7 @@ impl State {
         }
         self.selected = id;
         self.detail = None;
+        self.ws_run = None;
         self.detail_flight = Flight::default();
         self.refresh_detail();
     }
@@ -787,6 +876,8 @@ impl State {
                     mode: Some(mode.into()),
                     primary_harness: self.composer.harness.clone(),
                     workspace: self.composer.isolated.then(|| "isolated".to_string()),
+                    credential_profile_id: self.composer.harness.as_ref().and(self.composer.account.clone()),
+                    access: self.composer.opts.access.map(Into::into),
                 };
                 self.spawn(move |c| Msg::Created(c.create_thread(&create), PendingSend { req }));
             }
@@ -810,6 +901,19 @@ impl State {
         if let Some(id) = self.head_live_id() {
             self.spawn(move |c| Msg::Acked("Stop", c.cancel(&id)));
         }
+    }
+
+    /// Refused with `trust_full_access_required`: record the repo's full-access
+    /// grant, then replay the SAME turn (no new bubble), as one action.
+    pub fn grant_full_access_and_retry(&mut self, root: &str, turn_id: &str) {
+        let Some(tid) = self.selected.clone() else { return };
+        let (r, turn) = (root.to_string(), turn_id.to_string());
+        self.trust.remove(root);
+        self.composer.sending = true;
+        self.spawn(move |c| {
+            let res = c.grant_full_access(&r).and_then(|_| c.retry_turn(&tid, &turn));
+            Msg::TurnSent(tid.clone(), res, None)
+        });
     }
 
     pub fn retry(&mut self, turn_id: &str) {
@@ -1156,6 +1260,7 @@ impl State {
                 match r {
                     Ok(list) => {
                         // keep trashed rows too: the sidebar's Trash view lists them
+                        self.project_problems = list.problems;
                         let mut threads: Vec<Thread> = list.threads;
                         threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                         save_thread_cache(&threads);
@@ -1398,6 +1503,15 @@ impl State {
                 self.thread_apply.insert(tid, v);
                 self.refresh_detail();
             }
+            Msg::Preview(key, r) => {
+                self.previews.insert(
+                    key,
+                    match r {
+                        Ok(p) => Fetch::Ready(p),
+                        Err(e) => Fetch::Failed(e),
+                    },
+                );
+            }
             Msg::FileSaved(r) => match r {
                 Ok(path) => self.open_url(&path.to_string_lossy()),
                 Err(e) => self.error = Some(format!("Open output: {e}")),
@@ -1431,6 +1545,13 @@ impl State {
             Msg::TrustList(r) => match r {
                 Ok(l) => self.trust_all = Some(l.entries),
                 Err(e) => self.settings_note = Some(Err(format!("Trust: {e}"))),
+            },
+            Msg::Applicability(root, r) => match r {
+                Ok(a) => {
+                    self.applicability.insert(root, a);
+                }
+                // an older engine without the projection: no client-side gate
+                Err(e) => eprintln!("run-applicability for {root}: {e}"),
             },
             Msg::Trust(root, r) => {
                 match r {
@@ -1484,6 +1605,13 @@ impl State {
                         if let Some((h, p)) = login_after {
                             self.start_login_for(&h, Some(p));
                         }
+                    }
+                    // the binding stays registered when cleanup fails: say so, and that Remove can be retried
+                    Err(ApiError::Http { problem: Some(p), .. }) if p.code.as_deref() == Some("credential_cleanup_failed") => {
+                        self.error = Some(format!(
+                            "Couldn't remove Claudexor-owned state or a managed secret, so the account is still registered: {} Try Remove again.",
+                            p.message.clone().unwrap_or_default()
+                        ))
                     }
                     Err(e) => self.error = Some(format!("{what} failed: {e}")),
                 }
@@ -1563,6 +1691,10 @@ impl State {
                 if let Err(e) = r {
                     self.error = Some(format!("{what} failed: {e}"));
                 }
+                if what == "Relink project" {
+                    self.refresh_threads();
+                    self.spawn(|c| Msg::Projects(c.projects()));
+                }
                 self.refresh_detail();
             }
         }
@@ -1570,7 +1702,22 @@ impl State {
 
     /// Take a fresh thread detail: start streams for live turns and remember
     /// which terminal turns still need their answer.
+    /// Persist a sticky thread setting the moment the composer changes it
+    /// (Mac `setPrimaryHarness` / `setThreadAccess` / `setThreadCredentialProfile`).
+    pub fn patch_thread(&mut self, body: Value) {
+        let Some(tid) = self.selected.clone() else { return };
+        self.spawn(move |c| Msg::ThreadChanged("Save thread settings", c.update_thread(&tid, body.clone())));
+    }
+
     fn adopt_detail(&mut self, d: ThreadDetail) {
+        // opening a thread: the composer starts from its sticky settings
+        if self.detail.as_ref().is_none_or(|x| x.thread.id != d.thread.id) {
+            self.composer.harness = d.thread.primary_harness.clone();
+            self.composer.account = d.thread.credential_profile_id.clone();
+            self.composer.opts.access = d.thread.access.as_deref().and_then(access_str);
+            self.composer.model = None;
+            self.composer.effort = None;
+        }
         for turn in &d.turns {
             let Some(run) = &turn.run else { continue };
             let active = matches!(run.state.as_str(), "queued" | "running");
@@ -1658,11 +1805,22 @@ pub fn failure_line(f: &RunFailure) -> Option<String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn output_kinds() {
+        assert_eq!(output_kind("shot.PNG", None), Some("image"));
+        assert_eq!(output_kind("a.svg", Some("image/svg+xml")), None);
+        assert_eq!(output_kind("report.md", None), Some("text"));
+        assert_eq!(output_kind("blob.bin", Some("application/json")), Some("text"));
+        assert_eq!(output_kind("archive.tar", None), None);
+    }
+
+    #[test]
     fn route_notes_read_the_payload() {
         let ev: Value = serde_json::json!({"type": "route.profile.rotated", "payload": {"harness_id": "claude", "to_profile_id": "work"}});
         assert_eq!(route_note("route.profile.rotated", &ev).as_deref(), Some("Switched to account work (claude): quota limit"));
         let ev: Value = serde_json::json!({"payload": {"requested": "codex", "effective": "claude"}});
-        assert_eq!(route_note("route.primary.diverged", &ev).as_deref(), Some("Routed to claude instead of codex"));
+        assert_eq!(route_note("route.primary.diverged", &ev).as_deref(), Some("Requested codex → ran on claude"));
+        let ev: Value = serde_json::json!({"payload": {"requested": "codex", "effective": "claude", "reason": "quota_exhausted"}});
+        assert_eq!(route_note("route.primary.diverged", &ev).as_deref(), Some("Requested codex → ran on claude (codex quota exhausted)"));
         assert!(route_note("route.account.pool_selected", &ev).is_none());
     }
 
@@ -1806,7 +1964,15 @@ fn route_note(kind: &str, ev: &Value) -> Option<String> {
         "route.profile.headroom_exceeded" => format!("{h}: this account is near its quota limit"),
         "route.profile.rotation_exhausted" => format!("{h}: every enabled account is at its quota limit"),
         "route.primary.diverged" => {
-            format!("Routed to {} instead of {}{}", s("effective")?, s("requested")?, s("reason").map(|r| format!(" · {r}")).unwrap_or_default())
+            let why = match s("reason") {
+                Some("quota_exhausted" | "subscription_exhausted") => format!(" ({} quota exhausted)", s("requested")?),
+                Some("money_exhausted") => " (budget exhausted)".into(),
+                Some("rate_limited") => " (rate-limited)".into(),
+                Some("auth_unavailable") => " (unavailable)".into(),
+                Some(r) => format!(" · {r}"),
+                None => String::new(),
+            };
+            format!("Requested {} → ran on {}{why}", s("requested")?, s("effective")?)
         }
         _ => return None,
     })
@@ -1850,4 +2016,23 @@ fn save_output(run_id: &str, path: &str, bytes: &[u8]) -> Result<std::path::Path
     let dest = cache_dir().ok_or("no cache directory")?.join("outputs").join(run).join(name);
     write_private(&dest, bytes).map_err(|e| e.to_string())?;
     Ok(dest)
+}
+
+/// Human text for a refused file fetch (the engine withholds secrets-bearing files with 409).
+fn file_error(e: &ApiError) -> String {
+    match e {
+        ApiError::Http { status: 409, problem, .. } => {
+            let class = problem.as_ref().and_then(|p| p.context.as_ref()).and_then(|c| c.get("sensitiveClass")).and_then(Value::as_str);
+            let what = match class {
+                Some("dotenv") => "a dotenv (.env) file",
+                Some("package_registry_credentials") => "a package-registry credentials file",
+                Some("credentials_file") => "a credentials file",
+                _ => "a credential-bearing file",
+            };
+            format!("Refused: Claudexor does not serve {what}")
+        }
+        ApiError::Http { status: 413, .. } => "too large to preview".into(),
+        ApiError::Decode(m) if m.contains("limit") || m.contains("too large") => "too large to preview".into(),
+        e => e.to_string(),
+    }
 }

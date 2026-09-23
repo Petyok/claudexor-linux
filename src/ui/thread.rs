@@ -10,7 +10,7 @@ use super::glass::Kind;
 use super::theme::{MEASURE, R_MD, R_SM, SP, T_BODY, T_SMALL, T_TITLE, Theme, semibold, span};
 use super::{View, chip, dim, last_rect, store_rect};
 use crate::model::{Answer, Interaction, RunDetail, Turn};
-use crate::state::{AnswerState, Conn, Fetch, State, failure_line};
+use crate::state::{AnswerState, Conn, Fetch, Preview, State, failure_line};
 use crate::transcript::{Block, ToolStatus};
 use egui::{Align, Color32, Frame, Id, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, UiBuilder};
 use std::collections::HashMap;
@@ -115,7 +115,21 @@ fn body(ui: &mut Ui, v: &mut View, s: &mut State, drafts: &mut Drafts, t: &Theme
     if detail.thread.workspace_mode.as_deref() == Some("isolated") && detail.turns.iter().any(|x| x.run.as_ref().is_some_and(|r| r.mode.as_deref() == Some("agent"))) {
         apply_thread_bar(ui, v, s, &detail.thread.id);
     }
+    let has_runs = detail.turns.iter().any(|x| x.run_id.is_some());
+    if has_runs {
+        ui.horizontal(|ui| {
+            if ui.selectable_label(!s.ws_open, "Conversation").clicked() {
+                s.ws_open = false;
+            }
+            if ui.selectable_label(s.ws_open, "Workspace").on_hover_text("Changes, outputs and evidence of every run in this thread").clicked() {
+                s.ws_open = true;
+            }
+        });
+    }
     ui.add_space(4.0 * SP);
+    if s.ws_open && has_runs {
+        return workspace_panel(ui, v, s, drafts, &detail);
+    }
     if detail.turns.is_empty() {
         ui.label(dim(t, "No turns yet."));
     }
@@ -221,7 +235,7 @@ fn turn_card(
         // refused turn: typed problem + retry
         if let Some(err) = &turn.enqueue_error {
             if turn.run.is_none() {
-                refused(ui, v, s, turn, err);
+                refused(ui, v, s, drafts, turn, err);
                 return;
             }
         }
@@ -546,7 +560,7 @@ fn tool_row(ui: &mut Ui, t: &Theme, tool: &crate::transcript::Tool) {
     }
 }
 
-fn refused(ui: &mut Ui, v: &View, s: &mut State, turn: &Turn, err: &crate::model::EnqueueError) {
+fn refused(ui: &mut Ui, v: &View, s: &mut State, drafts: &mut Drafts, turn: &Turn, err: &crate::model::EnqueueError) {
     let t = v.t;
     Frame::new()
         .fill(t.failed.gamma_multiply(0.10))
@@ -565,7 +579,28 @@ fn refused(ui: &mut Ui, v: &View, s: &mut State, turn: &Turn, err: &crate::model
             for a in &err.required_actions {
                 ui.label(RichText::new(format!("• {a}")).color(t.text2).size(T_SMALL));
             }
-            if err.retryable != Some(false) {
+            let full_access = err.code.as_deref() == Some("trust_full_access_required");
+            let root = s.detail.as_ref().and_then(|d| d.thread.repo_root.clone());
+            if let (true, Some(root)) = (full_access, root) {
+                // two steps: the grant lets agents run unsandboxed in this repo
+                ui.add_space(SP);
+                let key = format!("full-access:{}", turn.id);
+                let online = s.client.is_some() && !s.composer.sending;
+                ui.horizontal_wrapped(|ui| {
+                    if drafts.override_armed.contains(&key) {
+                        ui.label(RichText::new(format!("Agents will run unsandboxed in {}.", super::basename(&root))).size(T_SMALL).color(t.needs_you));
+                        if ui.add_enabled(online, egui::Button::new(RichText::new("Grant & Retry").color(t.on_accent)).fill(t.failed)).clicked() {
+                            s.grant_full_access_and_retry(&root, &turn.id);
+                            drafts.override_armed.remove(&key);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            drafts.override_armed.remove(&key);
+                        }
+                    } else if ui.add_enabled(online, egui::Button::new("Allow full access & Retry…")).clicked() {
+                        drafts.override_armed.insert(key);
+                    }
+                });
+            } else if err.retryable != Some(false) {
                 ui.add_space(SP);
                 let b = egui::Button::new(RichText::new("Retry").color(t.on_accent)).fill(t.accent_solid).corner_radius(10);
                 if ui
@@ -1194,37 +1229,106 @@ fn decision_bar(ui: &mut Ui, v: &View, s: &mut State, drafts: &mut Drafts, d: &R
     });
 }
 
-/// Unified diff on a solid inset: files, hunks, +/− lines, capped for layout cost.
+/// One file of a unified diff: its path, +/− counts and gutter-numbered lines.
+pub struct DiffFile {
+    pub path: String,
+    pub adds: usize,
+    pub dels: usize,
+    /// (old line, new line, text); hunk headers carry neither number.
+    pub lines: Vec<(Option<u32>, Option<u32>, String)>,
+}
+
+/// Split a unified diff into files and number each line from its hunk header.
+pub fn parse_diff(text: &str) -> Vec<DiffFile> {
+    let mut files: Vec<DiffFile> = vec![];
+    let (mut old, mut new) = (0u32, 0u32);
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            let path = rest.rsplit(" b/").next().unwrap_or(rest).to_string();
+            files.push(DiffFile { path, adds: 0, dels: 0, lines: vec![] });
+            continue;
+        }
+        let Some(f) = files.last_mut() else { continue };
+        if line.starts_with("index ") || line.starts_with("--- ") || line.starts_with("+++ ") || line.starts_with("new file") || line.starts_with("deleted file") {
+            continue;
+        }
+        if let Some(h) = line.strip_prefix("@@ ") {
+            // @@ -a,b +c,d @@
+            let mut it = h.split_whitespace();
+            let num = |s: Option<&str>| s.and_then(|x| x[1..].split(',').next()).and_then(|x| x.parse::<u32>().ok()).unwrap_or(1);
+            old = num(it.next());
+            new = num(it.next());
+            f.lines.push((None, None, line.to_string()));
+        } else if line.starts_with('+') {
+            f.adds += 1;
+            f.lines.push((None, Some(new), line.to_string()));
+            new += 1;
+        } else if line.starts_with('-') {
+            f.dels += 1;
+            f.lines.push((Some(old), None, line.to_string()));
+            old += 1;
+        } else {
+            f.lines.push((Some(old), Some(new), line.to_string()));
+            old += 1;
+            new += 1;
+        }
+    }
+    files
+}
+
+/// Unified diff on a solid inset: a collapsible section per file with +/−
+/// counts and old/new gutters. Long files show 400 lines, then "Show all".
 fn diff_view(ui: &mut Ui, t: &Theme, text: &str) {
-    const MAX_LINES: usize = 600;
-    Frame::new().fill(t.code).corner_radius(R_SM).inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        let total = text.lines().count();
-        // ScrollArea's default 64 px minimum clipped short diffs to ~4 lines: size it from the content
-        let line_h = ui.fonts_mut(|f| f.row_height(&egui::FontId::monospace(T_SMALL)));
-        let want = (total.min(MAX_LINES + 1) as f32 * line_h + 4.0).min(420.0);
-        ScrollArea::both().max_height(420.0).min_scrolled_height(want).auto_shrink([false, true]).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for line in text.lines().take(MAX_LINES) {
-                let color = if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff ") {
-                    t.text
-                } else if line.starts_with('+') {
-                    t.success
-                } else if line.starts_with('-') {
-                    t.failed
-                } else if line.starts_with("@@") {
-                    t.accent
-                } else {
-                    t.text2
-                };
-                let rt = RichText::new(line).monospace().size(T_SMALL).color(color);
-                ui.add(egui::Label::new(if line.starts_with("diff ") { rt.strong() } else { rt }).extend());
-            }
-            if total > MAX_LINES {
-                ui.label(RichText::new(format!("… {} more lines", total - MAX_LINES)).size(T_SMALL).color(t.text3));
-            }
-        });
-    });
+    const CAP: usize = 400;
+    let files = parse_diff(text);
+    if files.is_empty() {
+        ui.label(dim(t, "The patch has no file changes."));
+        return;
+    }
+    let many = files.len() > 6;
+    for (i, f) in files.iter().enumerate() {
+        let id = ui.id().with(("diff-file", i, &f.path));
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, !many)
+            .show_header(ui, |ui| {
+                ui.label(RichText::new(&f.path).monospace().size(T_SMALL).color(t.text));
+                ui.label(RichText::new(format!("+{}", f.adds)).size(T_SMALL).color(t.success));
+                ui.label(RichText::new(format!("−{}", f.dels)).size(T_SMALL).color(t.failed));
+            })
+            .body(|ui| {
+                let all_key = id.with("all");
+                let show_all: bool = ui.ctx().data(|d| d.get_temp(all_key)).unwrap_or(false);
+                let n = if show_all { f.lines.len() } else { f.lines.len().min(CAP) };
+                // a horizontal row is at least interact_size tall, not one text line
+                let line_h = ui.fonts_mut(|x| x.row_height(&egui::FontId::monospace(T_SMALL))).max(ui.spacing().interact_size.y);
+                Frame::new().fill(t.code).corner_radius(R_SM).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let want = (n as f32 * line_h + 4.0).min(480.0);
+                    ScrollArea::both().id_salt(id.with("scroll")).max_height(480.0).min_scrolled_height(want).auto_shrink([false, true]).show_rows(ui, line_h, n, |ui, range| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        for (o, nw, line) in &f.lines[range] {
+                            let color = if line.starts_with('+') {
+                                t.success
+                            } else if line.starts_with('-') {
+                                t.failed
+                            } else if line.starts_with("@@") {
+                                t.accent
+                            } else {
+                                t.text2
+                            };
+                            let gut = |x: &Option<u32>| x.map_or("    ".to_string(), |v| format!("{v:>4}"));
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.label(RichText::new(format!("{} {}", gut(o), gut(nw))).monospace().size(T_SMALL).color(t.text3));
+                                ui.add(egui::Label::new(RichText::new(line).monospace().size(T_SMALL).color(color)).extend());
+                            });
+                        }
+                    });
+                });
+                if f.lines.len() > n && ui.button(RichText::new(format!("Show all {} lines", f.lines.len())).size(T_SMALL)).clicked() {
+                    ui.ctx().data_mut(|d| d.insert_temp(all_key, true));
+                }
+            });
+    }
 }
 
 /// Files the run wrote into the project's outputs; Open saves a private copy and hands it to the desktop.
@@ -1263,16 +1367,185 @@ fn outputs(ui: &mut Ui, v: &View, s: &mut State, turn: &Turn) {
         ui.label(dim(&t, "No produced files."));
     }
     for a in list {
+        let kind = crate::state::output_kind(&a.path, a.mime.as_deref());
         ui.horizontal(|ui| {
-            let image = a.mime.as_deref().is_some_and(|m| m.starts_with("image/") && m != "image/svg+xml");
-            ui.label(RichText::new(if image { "▣" } else { "◇" }).size(T_SMALL).color(t.text3));
+            ui.label(RichText::new(if kind == Some("image") { "▣" } else { "◇" }).size(T_SMALL).color(t.text3));
             ui.add(egui::Label::new(RichText::new(&a.path).size(T_SMALL).monospace().color(t.text)).truncate());
             if let Some(b) = a.bytes {
                 ui.label(dim(&t, format!("{} KB", b.div_ceil(1024))));
             }
-            if ui.add_enabled(s.client.is_some(), egui::Button::new(RichText::new("Open").size(T_SMALL))).clicked() {
+            if kind.is_some() && ui.add_enabled(s.client.is_some(), egui::Button::new(RichText::new("View").size(T_SMALL))).clicked() {
+                s.viewing = Some((rid.clone(), a.path.clone()));
+            }
+            if ui.add_enabled(s.client.is_some(), egui::Button::new(RichText::new("Open").size(T_SMALL))).on_hover_text("Open in the default app").clicked() {
                 s.open_output(&rid, &a.path);
             }
         });
+        // images get an inline thumbnail (click to enlarge)
+        if kind == Some("image") {
+            s.load_preview(&rid, &a.path, "image");
+            match s.previews.get(&State::preview_key(&rid, &a.path)) {
+                Some(Fetch::Ready(Preview::Image(bytes))) => {
+                    let img = egui::Image::from_bytes(format!("bytes://out/{rid}/{}", a.path), egui::load::Bytes::Shared(bytes.clone()))
+                        .max_height(140.0)
+                        .max_width(ui.available_width())
+                        .corner_radius(R_SM)
+                        .sense(Sense::click());
+                    if ui.add(img).on_hover_text("Click to enlarge").clicked() {
+                        s.viewing = Some((rid.clone(), a.path.clone()));
+                    }
+                }
+                Some(Fetch::Failed(e)) => {
+                    ui.label(RichText::new(format!("preview: {e}")).size(T_SMALL).color(t.text3));
+                }
+                _ => {
+                    ui.spinner();
+                }
+            }
+        }
+    }
+}
+
+/// The output viewer: an image at full size or a text file (markdown rendered).
+pub fn viewer(ctx: &egui::Context, v: &mut View, s: &mut State) {
+    let Some((rid, path)) = s.viewing.clone() else { return };
+    let t = v.t;
+    let kind = crate::state::output_kind(&path, None).unwrap_or("text");
+    s.load_preview(&rid, &path, kind);
+    let preview = match s.previews.get(&State::preview_key(&rid, &path)) {
+        Some(Fetch::Ready(p)) => Some(p.clone()),
+        Some(Fetch::Failed(e)) => {
+            let e = e.clone();
+            Some(Preview::Text(format!("Could not load {path}: {e}")))
+        }
+        _ => None,
+    };
+    let screen = ctx.content_rect();
+    let mut close = false;
+    let m = egui::Modal::new(Id::new("output-viewer")).show(ctx, |ui| {
+        ui.set_width((screen.width() - 96.0).min(980.0));
+        ui.horizontal(|ui| {
+            ui.add(egui::Label::new(RichText::new(&path).monospace().color(t.text)).truncate());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+                if ui.button("Open").on_hover_text("Open in the default app").clicked() {
+                    s.open_output(&rid, &path);
+                }
+            });
+        });
+        ui.separator();
+        let h = screen.height() - 160.0;
+        ScrollArea::both().max_height(h).min_scrolled_height(h.min(420.0)).auto_shrink([false, true]).show(ui, |ui| match preview {
+            Some(Preview::Image(bytes)) => {
+                ui.add(egui::Image::from_bytes(format!("bytes://out/{rid}/{path}"), egui::load::Bytes::Shared(bytes)).max_width(ui.available_width()));
+            }
+            Some(Preview::Text(text)) if path.ends_with(".md") => {
+                egui_commonmark::CommonMarkViewer::new().show(ui, v.md, &text);
+            }
+            Some(Preview::Text(text)) => {
+                Frame::new().fill(t.code).corner_radius(R_SM).inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(text).monospace().size(T_SMALL).color(t.text)).selectable(true).extend());
+                });
+            }
+            None => {
+                ui.spinner();
+            }
+        });
+    });
+    if close || m.should_close() {
+        s.viewing = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_diff;
+
+    #[test]
+    fn diff_parses_files_counts_and_gutters() {
+        let text = "diff --git a/notes.txt b/notes.txt\nindex 08fe272..fa8765f 100644\n--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1,2 @@\n first line\n+hello\ndiff --git a/x.rs b/x.rs\n--- a/x.rs\n+++ b/x.rs\n@@ -10,2 +10,1 @@\n-gone\n kept\n";
+        let f = parse_diff(text);
+        assert_eq!(f.len(), 2);
+        assert_eq!((f[0].path.as_str(), f[0].adds, f[0].dels), ("notes.txt", 1, 0));
+        assert_eq!(f[0].lines[1], (Some(1), Some(1), " first line".to_string()));
+        assert_eq!(f[0].lines[2], (None, Some(2), "+hello".to_string()));
+        assert_eq!(f[1].lines[1], (Some(10), None, "-gone".to_string()));
+        assert_eq!(f[1].lines[2], (Some(11), Some(10), " kept".to_string()));
+    }
+}
+
+/// Thread-wide workspace: one tab each for changes, outputs and evidence across
+/// the thread's runs, optionally filtered to a single run.
+fn workspace_panel(ui: &mut Ui, v: &mut View, s: &mut State, drafts: &mut Drafts, detail: &crate::model::ThreadDetail) {
+    let t = v.t;
+    let runs: Vec<(usize, &Turn, String)> = detail.turns.iter().enumerate().filter_map(|(i, x)| x.run_id.clone().map(|r| (i + 1, x, r))).collect();
+    if s.ws_run.as_ref().is_some_and(|r| !runs.iter().any(|x| &x.2 == r)) {
+        s.ws_run = None;
+    }
+    ui.horizontal_wrapped(|ui| {
+        for (k, label) in [(0u8, "Changes"), (1, "Outputs"), (2, "Evidence")] {
+            if ui.selectable_label(s.ws_tab == k, RichText::new(label).strong()).clicked() {
+                s.ws_tab = k;
+            }
+        }
+        ui.separator();
+        if ui.selectable_label(s.ws_run.is_none(), RichText::new("All runs").size(T_SMALL)).clicked() {
+            s.ws_run = None;
+        }
+        for (n, _, rid) in &runs {
+            let on = s.ws_run.as_deref() == Some(rid);
+            if ui.selectable_label(on, RichText::new(format!("Turn {n}")).size(T_SMALL)).on_hover_text(rid).clicked() {
+                s.ws_run = if on { None } else { Some(rid.clone()) };
+            }
+        }
+    });
+    ui.add_space(2.0 * SP);
+    let mut shown = 0;
+    for (n, turn, rid) in runs {
+        if s.ws_run.as_ref().is_some_and(|r| r != &rid) {
+            continue;
+        }
+        if !s.details.contains_key(&rid) {
+            s.load_run(&rid, false);
+        }
+        let Some(d) = s.details.get(&rid).cloned() else { continue };
+        let relevant = match s.ws_tab {
+            0 => d.has_patch() || d.summary.result.as_ref().is_some_and(|r| r.revertable),
+            1 => turn.run.as_ref().is_some_and(|r| r.mode.as_deref() == Some("agent")),
+            _ => true,
+        };
+        if !relevant {
+            continue;
+        }
+        shown += 1;
+        Frame::new().fill(t.raised).corner_radius(R_MD).inner_margin(Margin::same(12)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let title: String = turn.prompt.lines().next().unwrap_or("").chars().take(90).collect();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Turn {n}")).size(T_SMALL).strong().color(t.text2));
+                ui.add(egui::Label::new(RichText::new(title).size(T_SMALL).color(t.text)).truncate());
+            });
+            match s.ws_tab {
+                0 => {
+                    s.expanded.insert(format!("changes:{}", turn.id));
+                    workspace(ui, v, s, drafts, &d, turn);
+                }
+                1 => {
+                    s.expanded.insert(format!("outputs:{}", turn.id));
+                    outputs(ui, v, s, turn);
+                }
+                _ => run_details(ui, v, &d, turn),
+            }
+        });
+        ui.add_space(2.0 * SP);
+    }
+    if shown == 0 {
+        ui.label(dim(&t, match s.ws_tab {
+            0 => "No run in this thread changed files.",
+            1 => "No Agent run in this thread produced files.",
+            _ => "Run details load when a run finishes.",
+        }));
     }
 }
