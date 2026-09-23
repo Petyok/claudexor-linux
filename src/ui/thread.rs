@@ -9,7 +9,7 @@
 use super::glass::Kind;
 use super::theme::{MEASURE, R_MD, R_SM, SP, T_BODY, T_SMALL, T_TITLE, Theme, semibold, span};
 use super::{View, chip, dim, last_rect, store_rect};
-use crate::model::{Answer, Interaction, Turn};
+use crate::model::{Answer, Interaction, RunDetail, Turn};
 use crate::state::{AnswerState, Conn, State, failure_line};
 use crate::transcript::{Block, ToolStatus};
 use egui::{Align, Color32, Frame, Id, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, Ui, UiBuilder};
@@ -258,6 +258,19 @@ fn turn_card(
                 }
             } else if !s.expanded.remove(&expanded_key) {
                 s.expanded.insert(expanded_key.clone());
+            }
+        }
+        // 3b. run details (banner doubles as the toggle)
+        if let Some(d) = turn.run_id.as_ref().and_then(|r| s.details.get(r)).cloned() {
+            let key = format!("details:{}", turn.id);
+            let open = s.expanded.contains(&key);
+            let label = d.outcome_banner.clone().unwrap_or_else(|| "Run details".into());
+            let r = ui.add(egui::Button::new(dim(&t, format!("{} {label}", if open { "▼" } else { "▶" }))).frame(false));
+            if r.on_hover_text(if open { "Hide run details" } else { "Show run details" }).clicked() && !s.expanded.remove(&key) {
+                s.expanded.insert(key);
+            }
+            if open {
+                run_details(ui, v, &d, turn);
             }
         }
         // 4. activity transcript
@@ -793,4 +806,200 @@ fn option_chip<'a>(t: &Theme, on: bool, label: &'a str) -> egui::Button<'a> {
         .fill(if on { t.accent_solid } else { t.raised })
         .stroke(Stroke::new(1.0_f32, if on { t.accent } else { t.separator }))
         .corner_radius(10)
+}
+
+/// Phases the run has been through, derived from its timeline event types.
+fn phases(d: &RunDetail) -> Vec<(&'static str, bool)> {
+    const STEPS: [(&str, &[&str]); 5] = [
+        ("Queued", &["run.created", "task."]),
+        ("Routed", &["route."]),
+        ("Running", &["harness.", "attempt.", "tool."]),
+        ("Gates", &["gate."]),
+        ("Review", &["review."]),
+    ];
+    let seen = |pre: &[&str]| d.timeline.iter().any(|e| pre.iter().any(|p| e.kind.starts_with(p)));
+    let mut out: Vec<(&str, bool)> = STEPS.iter().filter(|(_, p)| seen(p)).map(|(n, _)| (*n, true)).collect();
+    let end = d.timeline.iter().rev().find_map(|e| match e.kind.as_str() {
+        "run.completed" => Some(("Done", true)),
+        "run.failed" => Some(("Failed", false)),
+        "run.blocked" => Some(("Blocked", false)),
+        _ => None,
+    });
+    out.extend(end);
+    out
+}
+
+/// Everything the run detail knows beyond the answer: phases, route facts,
+/// budget, plan checklist, candidates, review findings, children, warnings.
+fn run_details(ui: &mut Ui, v: &View, d: &RunDetail, turn: &Turn) {
+    let t = v.t;
+    let line = |ui: &mut Ui, k: &str, val: String| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(k).size(T_SMALL).color(t.text3));
+            ui.add(egui::Label::new(RichText::new(val).size(T_SMALL).color(t.text2)).wrap().selectable(true));
+        });
+    };
+    Frame::new().fill(t.raised).corner_radius(R_SM).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 3.0;
+        let ph = phases(d);
+        if !ph.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (i, (name, ok)) in ph.iter().enumerate() {
+                    if i > 0 {
+                        ui.label(RichText::new("›").size(T_SMALL).color(t.text3));
+                    }
+                    ui.label(RichText::new(*name).size(T_SMALL).color(if *ok { t.text } else { t.failed }));
+                }
+            });
+        }
+        let s = &d.summary;
+        match (s.requested_access.as_deref(), s.effective_access.as_deref()) {
+            (Some(r), Some(e)) if r != e => line(ui, "access", format!("{e} (asked {r})")),
+            (_, Some(e)) => line(ui, "access", e.to_string()),
+            _ => {}
+        }
+        if let Some(a) = &s.auth_route {
+            let mut v = a.effective.clone().unwrap_or_else(|| "?".into());
+            if let Some(r) = &a.reason {
+                v.push_str(&format!(" · {r}"));
+            }
+            if let Some(p) = &a.profile_id {
+                v.push_str(&format!(" · {p}"));
+            }
+            line(ui, "auth", v);
+        }
+        if let Some(w) = &s.web_evidence {
+            let mode = w.effective_mode.as_deref().or(w.mode.as_deref()).unwrap_or("?");
+            let st = w.status.as_deref().unwrap_or("none");
+            line(ui, "web", format!("{mode} · {st}{}", if w.required { " · required" } else { "" }));
+        }
+        if let Some(dl) = s.delegation.as_ref().filter(|x| x.requested) {
+            let st = if dl.used { "used" } else if dl.effective { "available, unused" } else { "unavailable" };
+            line(ui, "delegate", format!("{st}{}", dl.reason.as_ref().map(|r| format!(" · {r}")).unwrap_or_default()));
+        }
+        if let Some(st) = &s.strategy {
+            line(ui, "strategy", st.clone());
+        }
+        if let Some(c) = &turn.continuity {
+            let mut v = match c.kind.as_str() {
+                "native_resume" => "native session resume".to_string(),
+                "packet" => format!("context packet of {} turn{}", c.packet_turns, if c.packet_turns == 1 { "" } else { "s" }),
+                k => k.to_string(),
+            };
+            if c.summarized {
+                v.push_str(" · summarized");
+            }
+            if let Some(h) = c.lane_switched_from.as_ref().and_then(|l| l.harness.as_deref()) {
+                v.push_str(&format!(" · switched from {h}"));
+            }
+            line(ui, "context", v);
+        }
+        if let Some(b) = &d.budget {
+            let mut v = match b.spend_usd {
+                Some(x) => format!("${x:.2} cash ({})", b.cash_knowledge.as_deref().unwrap_or("unknown")),
+                None => "cash unknown".into(),
+            };
+            if let Some(x) = b.valuation_usd.filter(|x| *x > 0.0) {
+                v.push_str(&format!(" · ≈${x:.2} at list price"));
+            }
+            if let Some(cap) = b.paid_budget.as_ref().and_then(|p| p.get("maxUsd")).and_then(serde_json::Value::as_f64) {
+                v.push_str(&format!(" · cap ${cap:.2}"));
+            }
+            if let Some(r) = b.remaining_usd {
+                v.push_str(&format!(" · ${r:.2} left"));
+            }
+            line(ui, "budget", v);
+        }
+        if let Some(pp) = d.plan_progress.as_ref().filter(|p| !p.items.is_empty()) {
+            ui.add_space(SP / 2.0);
+            let done = pp.items.iter().filter(|i| i.status == "completed").count();
+            ui.label(RichText::new(format!("Plan {done}/{}", pp.items.len())).size(T_SMALL).strong().color(t.text2));
+            for it in &pp.items {
+                let (g, c) = match it.status.as_str() {
+                    "completed" => ("✓", t.success),
+                    "in_progress" => ("●", t.running),
+                    _ => ("○", t.text3),
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(g).size(T_SMALL).color(c));
+                    ui.label(RichText::new(&it.title).size(T_SMALL).color(t.text));
+                });
+            }
+        }
+        if !d.candidates.is_empty() {
+            ui.add_space(SP / 2.0);
+            ui.label(RichText::new("Candidates").size(T_SMALL).strong().color(t.text2));
+            for c in &d.candidates {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0 * SP;
+                    ui.label(RichText::new(if c.winner { "★" } else { "·" }).size(T_SMALL).color(t.accent));
+                    let h = c.harness_id.as_deref().unwrap_or("?");
+                    chip(ui, &t, h, t.harness(h));
+                    ui.label(dim(&t, &c.attempt_id));
+                    if let (Some(p), Some(n)) = (c.gates_passed, c.gates_total) {
+                        ui.label(dim(&t, format!("gates {p}/{n}")));
+                    }
+                    if let Some(x) = c.cost_usd {
+                        ui.label(dim(&t, format!("{}${x:.2}", if c.cost_estimated { "≈" } else { "" })));
+                    }
+                    if c.blockers > 0 {
+                        ui.label(RichText::new(format!("{} blocker{}", c.blockers, if c.blockers == 1 { "" } else { "s" })).size(T_SMALL).color(t.blocked));
+                    }
+                    if c.review_verified == Some(true) {
+                        ui.label(RichText::new("reviewed").size(T_SMALL).color(t.success));
+                    }
+                    if let Some(ds) = c.diffstat.as_ref().filter(|d| d.files > 0) {
+                        ui.label(dim(&t, format!("{} files +{} −{}", ds.files, ds.additions, ds.deletions)));
+                    }
+                    if c.errored {
+                        ui.label(RichText::new(c.error_reason.as_deref().unwrap_or("errored")).size(T_SMALL).color(t.failed));
+                    }
+                });
+            }
+        }
+        if !d.review_findings.is_empty() {
+            ui.add_space(SP / 2.0);
+            ui.label(RichText::new("Review findings").size(T_SMALL).strong().color(t.text2));
+            for f in &d.review_findings {
+                let c = match f.severity.as_str() {
+                    "BLOCK" | "FIX_FIRST" => t.failed,
+                    "WARN" | "NEEDS_HUMAN" => t.needs_you,
+                    _ => t.text3,
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(&f.severity).size(T_SMALL).strong().color(c));
+                    ui.label(dim(&t, format!("{} · {}", f.category, f.status)));
+                    ui.add(egui::Label::new(RichText::new(&f.claim).size(T_SMALL).color(t.text)).wrap().selectable(true));
+                });
+            }
+        }
+        if !d.children.is_empty() {
+            ui.add_space(SP / 2.0);
+            ui.label(RichText::new("Sub-runs").size(T_SMALL).strong().color(t.text2));
+            for c in &d.children {
+                let (color, glyph, word) = t.status(&c.state);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(glyph).size(T_SMALL).color(color));
+                    ui.label(dim(&t, format!("{} · {word}", c.run_id.as_deref().unwrap_or("?"))));
+                });
+            }
+        }
+        let warns: Vec<_> = d.timeline.iter().filter(|e| matches!(e.severity.as_str(), "warn" | "warning" | "error")).collect();
+        if !warns.is_empty() {
+            ui.add_space(SP / 2.0);
+            for e in warns.iter().rev().take(8).rev() {
+                let c = if e.severity == "error" { t.failed } else { t.needs_you };
+                let text = match &e.error_summary {
+                    Some(x) => format!("{} · {x}", e.title),
+                    None => e.title.clone(),
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("!").size(T_SMALL).strong().color(c));
+                    ui.add(egui::Label::new(RichText::new(text).size(T_SMALL).color(t.text2)).wrap().selectable(true));
+                });
+            }
+        }
+    });
 }

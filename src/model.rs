@@ -155,6 +155,30 @@ pub struct Turn {
     pub plan_hash: Option<String>,
     #[serde(default)]
     pub plan_readiness_overridden: bool,
+    /// How context reached this turn (native resume, or a replayed packet).
+    #[serde(default)]
+    pub continuity: Option<Continuity>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Continuity {
+    /// native_resume | packet | …
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub packet_turns: u32,
+    #[serde(default)]
+    pub summarized: bool,
+    #[serde(default)]
+    pub lane_switched_from: Option<LaneFrom>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaneFrom {
+    #[serde(default)]
+    pub harness: Option<String>,
 }
 
 /// The compact run card embedded on a turn (no N+1 detail fetch for the list).
@@ -234,6 +258,9 @@ pub struct CreateThread {
     pub mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_harness: Option<String>,
+    /// in_place (default) | isolated: a persistent thread worktree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -262,6 +289,224 @@ pub struct TurnRequest {
     /// Explicit, recorded override: implement although questions remain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_plan_readiness: Option<bool>,
+    /// Requested write scope (Agent only): readonly | workspace_write | full.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access: Option<String>,
+    /// Explicit eligible pool (Best-of candidates, Council members).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<String>,
+    /// Race width (Best-of) or Council member count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n: Option<u32>,
+    /// Plain-Agent repair cap; never together with `untilClean`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until_clean: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub council: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deep_scan: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegate: Option<bool>,
+    /// `{"kind":"finite","maxUsd":N}`; absent = the settings default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paid_budget: Option<Value>,
+    /// Harness-scoped model map; beats the scalar `model`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reviewer_panel: Vec<ReviewerEntry>,
+    /// off | auto | cached | live
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser: Option<bool>,
+    /// subscription | api_key | auto
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_preference: Option<String>,
+}
+
+/// One explicit reviewer: `harness[=model[:effort]]`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ReviewerEntry {
+    pub harness: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+/// Parse the reviewer-panel editor: comma-separated `harness=model:effort`
+/// entries (model and effort optional). Err names the first bad entry.
+pub fn parse_reviewer_panel(text: &str) -> Result<Vec<ReviewerEntry>, String> {
+    let slug = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.[]".contains(c));
+    let mut out = vec![];
+    for raw in text.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (harness, rest) = match raw.split_once('=') {
+            Some((h, r)) => (h.trim(), Some(r.trim())),
+            None => (raw, None),
+        };
+        let (model, effort) = match rest {
+            Some(r) => match r.split_once(':') {
+                Some((m, e)) => (Some(m.trim()).filter(|m| !m.is_empty()), Some(e.trim()).filter(|e| !e.is_empty())),
+                None => (Some(r).filter(|m| !m.is_empty()), None),
+            },
+            None => (None, None),
+        };
+        if !slug(harness) || model.is_some_and(|m| !slug(m)) || effort.is_some_and(|e| !slug(e)) {
+            return Err(format!("“{raw}” is not harness=model:effort"));
+        }
+        out.push(ReviewerEntry { harness: harness.into(), model: model.map(Into::into), effort: effort.map(Into::into) });
+    }
+    Ok(out)
+}
+
+/// Agent execution strategy (Single is the default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Strategy {
+    #[default]
+    Single,
+    BestOf,
+    UntilClean,
+    Create,
+}
+
+/// Composer "Options": per-turn knobs, sticky across sends. `None` fields mean
+/// "engine default" and stay off the wire.
+#[derive(Debug, Clone)]
+pub struct TurnOpts {
+    /// readonly | workspace_write | full; None = the repo's trust default.
+    pub access: Option<&'static str>,
+    pub strategy: Strategy,
+    /// Single-candidate repair cap (1..=8).
+    pub attempts: u32,
+    /// Explicit Best-of pool; empty = let the engine pick.
+    pub pool: Vec<String>,
+    /// Per-harness model for this turn (beats the scalar model).
+    pub models: BTreeMap<String, String>,
+    pub council: bool,
+    /// Council members (2..=4).
+    pub members: u32,
+    pub deep_scan: bool,
+    pub delegate: bool,
+    pub browser: bool,
+    /// Max paid spend in USD, as typed; empty = the settings default.
+    pub budget: String,
+    /// off | auto | cached | live
+    pub web: Option<&'static str>,
+    /// auto | subscription | api_key
+    pub auth: Option<&'static str>,
+    pub review: bool,
+    /// `harness[=model[:effort]]`, comma separated.
+    pub panel: String,
+}
+
+impl Default for TurnOpts {
+    fn default() -> Self {
+        TurnOpts {
+            access: None,
+            strategy: Strategy::Single,
+            attempts: 3,
+            pool: vec![],
+            models: BTreeMap::new(),
+            council: false,
+            members: 2,
+            deep_scan: false,
+            delegate: false,
+            browser: false,
+            budget: String::new(),
+            web: None,
+            auth: None,
+            review: false,
+            panel: String::new(),
+        }
+    }
+}
+
+impl TurnOpts {
+    /// Strategy as it will be sent: Until clean cannot run read-only.
+    pub fn strategy_for(&self, access: &str) -> Strategy {
+        if access == "readonly" && self.strategy == Strategy::UntilClean { Strategy::Single } else { self.strategy }
+    }
+
+    /// Write these options onto `req` (whose `mode` is already set). `access` is
+    /// the effective profile (explicit pick, else the repo default). Errors are
+    /// user-facing and block Send.
+    pub fn apply(&self, req: &mut TurnRequest, access: &str) -> Result<(), String> {
+        let budget = self.budget.trim();
+        if !budget.is_empty() {
+            match budget.trim_start_matches('$').parse::<f64>() {
+                Ok(usd) if usd.is_finite() && usd > 0.0 => req.paid_budget = Some(serde_json::json!({"kind": "finite", "maxUsd": usd})),
+                _ => return Err(format!("Budget “{budget}” is not a positive dollar amount")),
+            }
+        }
+        req.web = self.web.map(Into::into);
+        req.auth_preference = self.auth.map(Into::into);
+        req.models = self.models.iter().filter(|(_, m)| !m.trim().is_empty()).map(|(h, m)| (h.clone(), m.trim().into())).collect();
+        match req.mode.as_str() {
+            "ask" => req.deep_scan = self.deep_scan.then_some(true),
+            "plan" if self.council => {
+                req.council = Some(true);
+                req.n = Some(self.members.clamp(2, 4));
+            }
+            "agent" => {
+                let panel = parse_reviewer_panel(&self.panel)?;
+                let writable = access != "readonly";
+                req.access = self.access.map(Into::into);
+                req.delegate = self.delegate.then_some(true);
+                req.browser = self.browser.then_some(true);
+                let promised_review = match self.strategy_for(access) {
+                    Strategy::Single => {
+                        req.attempts = writable.then_some(self.attempts.clamp(1, 8));
+                        false
+                    }
+                    Strategy::BestOf => {
+                        req.harnesses = self.pool.clone();
+                        req.n = Some(if self.pool.len() == 1 { 1 } else { self.pool.len().max(2) as u32 });
+                        true
+                    }
+                    Strategy::UntilClean => {
+                        req.until_clean = Some(true);
+                        true
+                    }
+                    Strategy::Create => {
+                        req.create = Some(true);
+                        false
+                    }
+                };
+                req.review = Some(promised_review || self.review || !panel.is_empty());
+                req.reviewer_panel = panel;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// How many knobs differ from the defaults, for the Options badge.
+    pub fn changed(&self, mode: &str) -> usize {
+        let d = TurnOpts::default();
+        let common = [self.web.is_some(), self.auth.is_some(), !self.budget.trim().is_empty(), !self.models.is_empty()];
+        let per_mode: Vec<bool> = match mode {
+            "ask" => vec![self.deep_scan],
+            "plan" => vec![self.council],
+            "agent" => vec![
+                self.access.is_some(),
+                self.strategy != d.strategy,
+                self.strategy == Strategy::Single && self.attempts != d.attempts,
+                self.delegate,
+                self.browser,
+                self.review,
+                !self.panel.trim().is_empty(),
+            ],
+            _ => vec![],
+        };
+        common.iter().chain(&per_mode).filter(|b| **b).count()
+    }
 }
 
 impl TurnRequest {
@@ -277,6 +522,22 @@ impl TurnRequest {
             answers_plan_run_id: None,
             plan_run_id: None,
             override_plan_readiness: None,
+            access: None,
+            harnesses: vec![],
+            n: None,
+            attempts: None,
+            until_clean: None,
+            create: None,
+            council: None,
+            deep_scan: None,
+            delegate: None,
+            paid_budget: None,
+            models: BTreeMap::new(),
+            review: None,
+            reviewer_panel: vec![],
+            web: None,
+            browser: None,
+            auth_preference: None,
         }
     }
 }
@@ -410,6 +671,114 @@ pub struct RunDetail {
     /// ready | needs_answers | unverified; None for non-plan runs.
     #[serde(default)]
     pub plan_readiness: Option<PlanReadiness>,
+    #[serde(default)]
+    pub budget: Option<RunBudget>,
+    /// Engine-composed one-liner, e.g. "Done · not reviewed".
+    #[serde(default)]
+    pub outcome_banner: Option<String>,
+    #[serde(default, deserialize_with = "lossy")]
+    pub candidates: Vec<Candidate>,
+    #[serde(default, deserialize_with = "lossy")]
+    pub review_findings: Vec<ReviewFinding>,
+    #[serde(default, deserialize_with = "lossy")]
+    pub children: Vec<RunSummary>,
+    #[serde(default)]
+    pub plan_progress: Option<PlanProgress>,
+    #[serde(default, deserialize_with = "lossy")]
+    pub timeline: Vec<TimelineEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunBudget {
+    #[serde(default)]
+    pub spend_usd: Option<f64>,
+    /// exact | estimated | unknown
+    #[serde(default)]
+    pub cash_knowledge: Option<String>,
+    /// What the run would have cost at list prices (subscription runs spend $0 cash).
+    #[serde(default)]
+    pub valuation_usd: Option<f64>,
+    #[serde(default)]
+    pub valuation_knowledge: Option<String>,
+    #[serde(default)]
+    pub paid_budget: Option<Value>,
+    #[serde(default)]
+    pub remaining_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Candidate {
+    #[serde(default)]
+    pub attempt_id: String,
+    #[serde(default)]
+    pub harness_id: Option<String>,
+    #[serde(default)]
+    pub winner: bool,
+    #[serde(default)]
+    pub gates_passed: Option<u32>,
+    #[serde(default)]
+    pub gates_total: Option<u32>,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub cost_estimated: bool,
+    #[serde(default)]
+    pub blockers: u32,
+    #[serde(default)]
+    pub review_verified: Option<bool>,
+    #[serde(default)]
+    pub errored: bool,
+    #[serde(default)]
+    pub error_reason: Option<String>,
+    #[serde(default)]
+    pub diffstat: Option<DiffStat>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReviewFinding {
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub claim: String,
+    #[serde(default)]
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlanProgress {
+    #[serde(default, deserialize_with = "lossy")]
+    pub items: Vec<PlanItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlanItem {
+    #[serde(default)]
+    pub title: String,
+    /// pending | in_progress | completed
+    #[serde(default)]
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineEvent {
+    #[serde(default)]
+    pub ts: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub title: String,
+    /// info | warn | error
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub harness_id: Option<String>,
+    #[serde(default)]
+    pub error_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -479,6 +848,60 @@ pub struct RunSummary {
     /// Requested vs stream-observed model (verified only on observed evidence).
     #[serde(default)]
     pub route: Option<RunRoute>,
+    #[serde(default)]
+    pub requested_access: Option<String>,
+    #[serde(default)]
+    pub effective_access: Option<String>,
+    #[serde(default)]
+    pub auth_route: Option<AuthRoute>,
+    #[serde(default)]
+    pub web_evidence: Option<WebEvidence>,
+    #[serde(default)]
+    pub delegation: Option<RunDelegation>,
+    /// race | attempts | until_clean | create | council | …; None = single.
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthRoute {
+    #[serde(default)]
+    pub requested: Option<String>,
+    #[serde(default)]
+    pub effective: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default, rename = "profileId")]
+    pub profile_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebEvidence {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub effective_mode: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunDelegation {
+    #[serde(default)]
+    pub requested: bool,
+    #[serde(default)]
+    pub effective: bool,
+    #[serde(default)]
+    pub used: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -599,11 +1022,51 @@ pub struct Harness {
     /// Engine-owned login transport (`in_app` = daemon job, `external_terminal` = attach a PTY).
     #[serde(default)]
     pub setup_login: Option<SetupLogin>,
+    #[serde(default)]
+    pub delegation: Option<Delegation>,
+}
+
+/// Engine-owned Delegate capability for one harness.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Delegation {
+    pub available: bool,
+    #[serde(default)]
+    pub remediation: Option<String>,
+    #[serde(default)]
+    pub requires_full_access: bool,
+}
+
+/// One repo's trust file: the default access profile and the full-access grant.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustState {
+    #[serde(default)]
+    pub repo_root: Option<String>,
+    #[serde(default)]
+    pub allow_full_access: bool,
+    /// readonly | workspace_write | full | inherit_native
+    #[serde(default)]
+    pub access_default: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrustList {
+    #[serde(default)]
+    pub entries: Vec<TrustState>,
 }
 
 impl Harness {
     pub fn label(&self) -> &str {
         self.manifest.as_ref().and_then(|m| m.display_name.as_deref()).unwrap_or(&self.id)
+    }
+
+    pub fn browser_tool(&self) -> bool {
+        self.manifest.as_ref().and_then(|m| m.capabilities.as_ref()).and_then(|c| c.browser_tool).unwrap_or(false)
+    }
+
+    pub fn can_delegate(&self) -> bool {
+        self.delegation.as_ref().is_some_and(|d| d.available)
     }
 
     /// Effort ladder for `model` (per-model list first, then harness-wide).
@@ -634,6 +1097,9 @@ pub struct Capabilities {
     pub effort_levels: Vec<String>,
     #[serde(default)]
     pub model_effort_levels: BTreeMap<String, ModelEffort>,
+    /// The harness can drive a real browser window (the Browser option).
+    #[serde(default)]
+    pub browser_tool: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1071,4 +1537,75 @@ mod plan_tests {
                                "overridePlanReadiness": true, "attachments": [{"resourceId": "res-1"}]})
         );
     }
+    #[test]
+    fn options_map_to_the_wire() {
+        let wire = |mode: &str, o: &TurnOpts, access: &str| {
+            let mut r = TurnRequest::new("p", mode);
+            o.apply(&mut r, access).map(|()| serde_json::to_value(&r).unwrap())
+        };
+        // Defaults: Agent Single sends its repair cap and an explicit review opt-out, nothing else.
+        let v = wire("agent", &TurnOpts::default(), "workspace_write").unwrap();
+        assert_eq!(v["attempts"], 3);
+        assert_eq!(v["review"], false);
+        assert!(v.get("access").is_none() && v.get("n").is_none() && v.get("paidBudget").is_none());
+        // Read-only: no repair loop; a stale Until clean degrades to Single.
+        let o = TurnOpts { strategy: Strategy::UntilClean, access: Some("readonly"), ..Default::default() };
+        let v = wire("agent", &o, "readonly").unwrap();
+        assert!(v.get("untilClean").is_none() && v.get("attempts").is_none());
+        assert_eq!(v["access"], "readonly");
+        // Best-of: one-harness pool single-routes, larger pools race one per harness.
+        let o = TurnOpts { strategy: Strategy::BestOf, pool: vec!["claude".into()], ..Default::default() };
+        assert_eq!(wire("agent", &o, "workspace_write").unwrap()["n"], 1);
+        let o = TurnOpts { strategy: Strategy::BestOf, pool: vec!["claude".into(), "codex".into(), "agy".into()], ..Default::default() };
+        let v = wire("agent", &o, "workspace_write").unwrap();
+        assert_eq!((v["n"].as_u64(), v["review"].as_bool(), v.get("attempts")), (Some(3), Some(true), None));
+        let o = TurnOpts { strategy: Strategy::BestOf, ..Default::default() };
+        assert_eq!(wire("agent", &o, "workspace_write").unwrap()["n"], 2);
+        // Until clean never sends attempts.
+        let o = TurnOpts { strategy: Strategy::UntilClean, ..Default::default() };
+        let v = wire("agent", &o, "workspace_write").unwrap();
+        assert_eq!((v["untilClean"].as_bool(), v.get("attempts")), (Some(true), None));
+        // A reviewer panel is a review request; a bad one blocks Send.
+        let o = TurnOpts { panel: "codex=gpt-5:high".into(), ..Default::default() };
+        let v = wire("agent", &o, "workspace_write").unwrap();
+        assert_eq!((v["review"].as_bool(), v["reviewerPanel"][0]["effort"].as_str()), (Some(true), Some("high")));
+        assert!(wire("agent", &TurnOpts { panel: "bad harness".into(), ..Default::default() }, "workspace_write").is_err());
+        // Plan Council clamps members; Ask carries deep scan; agent knobs never leak.
+        let o = TurnOpts { council: true, members: 9, deep_scan: true, delegate: true, ..Default::default() };
+        let v = wire("plan", &o, "workspace_write").unwrap();
+        assert_eq!((v["council"].as_bool(), v["n"].as_u64()), (Some(true), Some(4)));
+        assert!(v.get("deepScan").is_none() && v.get("delegate").is_none() && v.get("review").is_none());
+        assert_eq!(wire("ask", &o, "readonly").unwrap()["deepScan"], true);
+        // Budget: "$2.5" is a finite cap, junk refuses.
+        let o = TurnOpts { budget: "$2.5".into(), web: Some("live"), ..Default::default() };
+        let v = wire("ask", &o, "readonly").unwrap();
+        assert_eq!((v["paidBudget"]["maxUsd"].as_f64(), v["web"].as_str()), (Some(2.5), Some("live")));
+        assert!(wire("ask", &TurnOpts { budget: "-1".into(), ..Default::default() }, "readonly").is_err());
+    }
+
+    #[test]
+    fn run_detail_depth_decodes() {
+        let d: RunDetail = serde_json::from_str(include_str!("../tests/fixtures/live/run.run-7ef7c842eb39.json")).unwrap();
+        assert_eq!(d.outcome_banner.as_deref(), Some("Done · not reviewed"));
+        let b = d.budget.unwrap();
+        assert_eq!((b.cash_knowledge.as_deref(), b.valuation_usd), (Some("exact"), Some(0.09783)));
+        assert_eq!(d.timeline[0].kind, "run.created");
+        let s = d.summary;
+        assert_eq!((s.requested_access.as_deref(), s.effective_access.as_deref()), (Some("readonly"), Some("readonly")));
+        assert_eq!(s.auth_route.unwrap().effective.as_deref(), Some("local_session"));
+        assert_eq!(s.web_evidence.unwrap().effective_mode.as_deref(), Some("auto"));
+        assert!(!s.delegation.unwrap().requested);
+        let turn = |f: &str| serde_json::from_value::<Turn>(serde_json::from_str::<Value>(f).unwrap()["value"].clone()).unwrap();
+        let c = turn(include_str!("../tests/fixtures/thread-turn-continuity-packet.json")).continuity.unwrap();
+        assert_eq!((c.kind.as_str(), c.packet_turns, c.lane_switched_from.and_then(|l| l.harness)), ("packet", 3, Some("codex".into())));
+    }
+
+    #[test]
+    fn harness_capabilities_decode() {
+        let list: HarnessList = serde_json::from_str(include_str!("../tests/fixtures/live/harnesses.json")).unwrap();
+        let claude = list.harnesses.iter().find(|h| h.id == "claude").expect("claude row survives lossy decode");
+        assert!(claude.can_delegate() && claude.browser_tool());
+        assert!(!list.harnesses.iter().find(|h| h.id == "codex").unwrap().can_delegate());
+    }
+
 }

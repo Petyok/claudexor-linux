@@ -6,6 +6,7 @@
 use super::glass::Kind;
 use super::theme::{R_LG, R_SM, SP, T_BODY, T_SMALL};
 use super::{View, basename, dim, last_rect, store_rect};
+use crate::model::{Strategy, TurnOpts};
 use crate::state::{MODES, State};
 use egui::{Align, Frame, Id, Key, Layout, Margin, Modifiers, Rect, RichText, Stroke, TextEdit, Ui, UiBuilder, pos2, vec2};
 
@@ -54,6 +55,10 @@ fn controls(ui: &mut Ui, v: &View, s: &mut State, inner_w: f32) {
             items.push((114.0, effort_pick));
         }
     }
+    if let Some(root) = s.effective_root() {
+        s.load_trust(&root);
+    }
+    items.push((104.0, options_pick));
     let mut rows: Vec<Vec<Control>> = vec![vec![]];
     let mut used = 0.0;
     for it in items {
@@ -268,10 +273,13 @@ fn input(ui: &mut Ui, v: &View, s: &mut State, inner_w: f32) {
                     .fill(t.accent_solid)
                     .corner_radius(R_SM)
                     .min_size(vec2(btn_w, 34.0));
+                let opt_err = s.options_error();
                 let why = if s.client.is_none() {
                     "Engine offline"
                 } else if s.composer.text.trim().is_empty() {
                     "Type a message first"
+                } else if let Some(e) = &opt_err {
+                    e
                 } else {
                     "Sending…"
                 };
@@ -287,6 +295,186 @@ fn input(ui: &mut Ui, v: &View, s: &mut State, inner_w: f32) {
     if s.effective_root().is_none() {
         ui.label(dim(&t, "Pick a project to use Plan and Agent."));
     }
+}
+
+/// "Options": every per-turn knob the current mode takes, with a badge counting
+/// the ones changed from the defaults. The list stays open while editing.
+fn options_pick(ui: &mut Ui, v: &View, s: &mut State) {
+    let t = v.t;
+    let mode = if s.effective_root().is_none() { "ask" } else { s.current_mode() };
+    let draft_isolated = s.selected.is_none() && s.composer.isolated;
+    let n = s.composer.opts.changed(mode) + usize::from(draft_isolated);
+    let bad = s.options_error().is_some();
+    let label = if n == 0 { "Options".to_string() } else { format!("Options · {n}") };
+    let color = if bad { t.failed } else if n > 0 { t.accent } else { t.text };
+    drop_up(ui, "options", RichText::new(label).size(T_SMALL).color(color), 84.0, true, |ui| {
+        ui.set_width(300.0);
+        ui.spacing_mut().item_spacing.y = SP;
+        match mode {
+            "agent" => agent_options(ui, v, s),
+            "plan" => {
+                let o = &mut s.composer.opts;
+                ui.checkbox(&mut o.council, "Council: several harnesses draft, the primary merges");
+                if o.council {
+                    ui.add(egui::DragValue::new(&mut o.members).range(2..=4).prefix("Members: "));
+                }
+            }
+            _ => {
+                ui.checkbox(&mut s.composer.opts.deep_scan, "Deep scan: read the whole project first");
+            }
+        }
+        heading(ui, v, "Web");
+        choice(ui, &mut s.composer.opts.web, &[(None, "Default"), (Some("off"), "Off"), (Some("auto"), "Auto"), (Some("cached"), "Cached"), (Some("live"), "Live")]);
+        heading(ui, v, "Auth route");
+        choice(ui, &mut s.composer.opts.auth, &[(None, "Default"), (Some("auto"), "Auto"), (Some("subscription"), "Subscription"), (Some("api_key"), "API key")]);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Budget $").size(T_SMALL));
+            ui.add(TextEdit::singleline(&mut s.composer.opts.budget).hint_text("settings default").desired_width(110.0));
+        });
+        if s.selected.is_none() && s.composer.project.is_some() {
+            ui.checkbox(&mut s.composer.isolated, "Isolated workspace (own worktree for this thread)");
+        }
+        if let Some(e) = s.options_error() {
+            ui.label(RichText::new(e).size(T_SMALL).color(t.failed));
+        }
+        if n > 0 && ui.button(RichText::new("Reset to defaults").size(T_SMALL)).clicked() {
+            s.composer.opts = TurnOpts::default();
+            s.composer.isolated = false;
+        }
+    });
+}
+
+fn agent_options(ui: &mut Ui, v: &View, s: &mut State) {
+    let t = v.t;
+    let root = s.effective_root().unwrap_or_default();
+    let trust = s.repo_trust().cloned();
+    let default_label = match trust.as_ref().map(|t| t.access_default.as_str()) {
+        Some("readonly") => "Repo default (read-only)",
+        Some("full") => "Repo default (full)",
+        _ => "Repo default (workspace write)",
+    };
+    heading(ui, v, "Access");
+    choice(ui, &mut s.composer.opts.access, &[(None, default_label), (Some("readonly"), "Read-only"), (Some("workspace_write"), "Workspace write"), (Some("full"), "Full")]);
+    if s.composer.opts.access == Some("full") && !trust.as_ref().is_some_and(|t| t.allow_full_access) {
+        ui.label(RichText::new("Full access runs unsandboxed. It needs a recorded grant for this repo.").size(T_SMALL).color(t.needs_you));
+        // Two deliberate steps: the grant button appears under the pointer when the
+        // layout shifts, so one stray click must never be enough to grant it.
+        let key = Id::new(("full-access-ack", &root));
+        let mut ack: bool = ui.ctx().data(|d| d.get_temp(key)).unwrap_or(false);
+        ui.checkbox(&mut ack, RichText::new(format!("I want agents to run unsandboxed in {}", basename(&root))).size(T_SMALL));
+        ui.ctx().data_mut(|d| d.insert_temp(key, ack));
+        if ui.add_enabled(ack, egui::Button::new(RichText::new("Grant full access").size(T_SMALL))).clicked() {
+            s.grant_full_access(&root);
+            ui.ctx().data_mut(|d| d.remove::<bool>(key));
+        }
+    }
+    let access = s.effective_access();
+
+    heading(ui, v, "Strategy");
+    let mut strategies = vec![(Strategy::Single, "Single"), (Strategy::BestOf, "Best-of"), (Strategy::UntilClean, "Until clean"), (Strategy::Create, "Create")];
+    if access == "readonly" {
+        strategies.retain(|x| x.0 != Strategy::UntilClean);
+    }
+    let o = &mut s.composer.opts;
+    ui.horizontal_wrapped(|ui| {
+        for (k, label) in strategies {
+            ui.selectable_value(&mut o.strategy, k, RichText::new(label).size(T_SMALL));
+        }
+    });
+    let blurb = match o.strategy_for(access) {
+        Strategy::Single => "One candidate; review is optional.",
+        Strategy::BestOf => "One candidate per pooled harness in isolated envelopes, cross-reviewed; the best wins.",
+        Strategy::UntilClean => "One envelope repaired until gates and review are clean.",
+        Strategy::Create => "Scaffold a new repo or component.",
+    };
+    ui.label(dim(&t, blurb));
+    match o.strategy_for(access) {
+        Strategy::Single if access != "readonly" => {
+            ui.add(egui::DragValue::new(&mut o.attempts).range(1..=8).prefix("Max attempts: "));
+        }
+        Strategy::BestOf => {
+            ui.label(dim(&t, "Pool (none = the engine picks two):"));
+            let ids: Vec<(String, bool)> = s.harnesses.iter().map(|h| (h.id.clone(), h.status != "unavailable")).collect();
+            for (id, ok) in ids {
+                let mut on = s.composer.opts.pool.contains(&id);
+                if ui.add_enabled(ok, egui::Checkbox::new(&mut on, &id)).changed() {
+                    if on {
+                        s.composer.opts.pool.push(id.clone());
+                    } else {
+                        s.composer.opts.pool.retain(|x| x != &id);
+                        s.composer.opts.models.remove(&id);
+                    }
+                }
+                if on {
+                    s.load_models(&id);
+                    pool_model(ui, v, s, &id);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let primary = s.composer.harness.clone();
+    let offered = |f: fn(&crate::model::Harness) -> bool| match &primary {
+        Some(p) => s.harnesses.iter().any(|h| &h.id == p && f(h)),
+        None => s.harnesses.iter().any(f),
+    };
+    let (can_delegate, can_browse) = (offered(|h| h.can_delegate()), offered(|h| h.browser_tool()));
+    let o = &mut s.composer.opts;
+    if !can_delegate {
+        o.delegate = false;
+    }
+    ui.add_enabled(can_delegate, egui::Checkbox::new(&mut o.delegate, "Delegate: let the agent spawn bounded sub-runs"))
+        .on_disabled_hover_text("The chosen harness cannot receive the delegation belt");
+    if can_browse {
+        ui.checkbox(&mut o.browser, "Browser: the agent drives a real window");
+    } else {
+        o.browser = false;
+    }
+
+    heading(ui, v, "Review");
+    let promised = matches!(o.strategy_for(access), Strategy::BestOf | Strategy::UntilClean);
+    let mut on = promised || o.review || !o.panel.trim().is_empty();
+    if ui.add_enabled(!promised, egui::Checkbox::new(&mut on, "Review changes")).changed() {
+        o.review = on;
+    }
+    ui.add(TextEdit::singleline(&mut o.panel).hint_text("reviewers: codex=gpt-5:high, claude").desired_width(280.0))
+        .on_hover_text("Explicit reviewer panel: harness[=model[:effort]], comma separated");
+}
+
+/// Model chips for one pooled harness (its truth-source list only).
+fn pool_model(ui: &mut Ui, v: &View, s: &mut State, harness: &str) {
+    let Some(Ok(list)) = s.models.get(harness) else { return };
+    let ids: Vec<(String, String)> = list.models.iter().map(|m| (m.id.clone(), m.label.clone().unwrap_or_else(|| m.id.clone()))).collect();
+    if ids.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(20.0);
+        let cur = s.composer.opts.models.get(harness).cloned();
+        if ui.selectable_label(cur.is_none(), RichText::new("default").size(T_SMALL)).clicked() {
+            s.composer.opts.models.remove(harness);
+        }
+        for (id, label) in ids {
+            if ui.selectable_label(cur.as_deref() == Some(&id), RichText::new(label).size(T_SMALL).color(v.t.text2)).clicked() {
+                s.composer.opts.models.insert(harness.to_string(), id);
+            }
+        }
+    });
+}
+
+fn heading(ui: &mut Ui, v: &View, text: &str) {
+    ui.add_space(SP / 2.0);
+    ui.label(RichText::new(text).size(T_SMALL).strong().color(v.t.text2));
+}
+
+/// A wrapped row of mutually exclusive choices.
+fn choice(ui: &mut Ui, value: &mut Option<&'static str>, options: &[(Option<&'static str>, &str)]) {
+    ui.horizontal_wrapped(|ui| {
+        for (k, label) in options {
+            ui.selectable_value(value, *k, RichText::new(*label).size(T_SMALL));
+        }
+    });
 }
 
 /// Pin the turn to one account of the chosen harness ("Automatic" = the
@@ -397,6 +585,8 @@ fn drop_up(ui: &mut Ui, id_salt: impl std::hash::Hash, text: RichText, width: f3
     }
     popup.show(|ui| {
         ui.set_min_width(width);
-        egui::ScrollArea::vertical().max_height(320.0).show(ui, add);
+        // the Options list carries a dozen knobs: let it use the room above the composer
+        let max_h = if keep_open { (resp.rect.top() - 24.0).clamp(320.0, 520.0) } else { 320.0 };
+        egui::ScrollArea::vertical().max_height(max_h).show(ui, add);
     });
 }

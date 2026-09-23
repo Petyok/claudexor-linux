@@ -434,6 +434,7 @@ fn send(prompt: &str) -> Result<(), String> {
             scope: model::Scope::None,
             mode: Some("ask".into()),
             primary_harness: None,
+            workspace: None,
         })
         .map_err(|e| e.to_string())?;
     println!("thread {}", th.id);

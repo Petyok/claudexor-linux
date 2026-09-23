@@ -24,11 +24,18 @@ running (`CXL_NO_AUTOSTART=1` to opt out), and reconnects on its own.
   model that actually answered, time, cost, tools), live activity (thinking, tool
   rows) streamed over SSE and resumed without duplicates after an engine restart,
   refused / failed cards with the engine's own message, interactive questions.
+  Each turn's outcome banner opens run details: phases, access, auth route, web
+  evidence, context continuity, budget, plan checklist, Best-of candidates,
+  review findings, sub-runs and warnings.
 - **Plan**: readiness chip, answer the plan's open questions (sent as a follow-up
   plan turn), **Implement plan** / **Implement anyway** (recorded override).
 - **Composer**: Ask / Plan / Agent, project, harness, model, effort, account pin,
   attachments (file chooser via zenity/kdialog, screen region via grim + slurp),
-  Send / Stop / Retry.
+  Send / Stop / Retry. **Options**: access (a full-access grant takes an explicit
+  confirmation), Single / Best-of (explicit pool, per-harness models) / Until
+  clean / Create, max attempts, Delegate, Browser, review and reviewer panel,
+  Plan Council, Ask deep scan, web mode, auth route, budget cap, isolated
+  workspace.
 - **Accounts**: per-account readiness and quota windows, Enabled toggle, in-app
   **Log in** (open the link, paste the code back), Add account, Remove.
 - **Desktop notifications** (notify-send) when a turn finishes or needs you and the
@@ -72,5 +79,5 @@ Reference measurements on a low-end integrated GPU (Intel HD 6000, Mesa 26.2),
 | idle CPU | 0% | 0.03% (1 tick / 30 s: SSE heartbeat) |
 | cold start → window | < 300 ms | 220 ms |
 | frame with glass (GPU) | < 4 ms | 1.6 ms avg, 1.9 ms max |
-| release binary | < 15 MB | 13.5 MB (with AccessKit) |
+| release binary | < 15 MB | 13.8 MB (with AccessKit) |
 | idle RSS | < 80 MB | 94 MB VmRSS, of which 65 MB is Mesa's shared `libLLVM`/`libgallium`; app-private 22 MB, PSS 36 MB |

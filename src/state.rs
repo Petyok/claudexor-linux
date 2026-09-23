@@ -77,6 +77,7 @@ pub enum Msg {
     LoginJob(Result<SetupJob, ApiError>),
     LoginSnap(Result<SetupSnapshot, ApiError>),
     LoginInput(Result<SetupJob, ApiError>),
+    Trust(String, Result<Option<TrustState>, ApiError>),
 }
 
 /// Live state of one run stream (keyed by the id the stream was opened with:
@@ -137,6 +138,10 @@ pub struct Composer {
     pub attachments: Vec<Attachment>,
     /// In-flight native file picker / screen capture.
     pub picking: bool,
+    /// Draft thread only: keep turns in a persistent thread worktree.
+    pub isolated: bool,
+    /// The "Options" knobs (strategy, access, review, budget, …).
+    pub opts: TurnOpts,
 }
 
 pub struct Attachment {
@@ -204,6 +209,8 @@ pub struct State {
     /// turn id → stream id, for turns whose run id is not yet on the detail.
     pub turn_stream: HashMap<String, String>,
     pub details: HashMap<String, RunDetail>,
+    /// Last live-driven detail refresh per run (throttle).
+    detail_at: HashMap<String, Instant>,
     pub answers: HashMap<String, AnswerState>,
     run_flight: HashSet<String>,
     /// Turns whose activity the user expanded (terminal turns collapse by default).
@@ -212,6 +219,8 @@ pub struct State {
 
     pub harnesses: Vec<Harness>,
     pub models: HashMap<String, Result<ModelList, String>>,
+    /// Repo trust by root: Ok(None) = no trust file (engine defaults).
+    pub trust: HashMap<String, Result<Option<TrustState>, String>>,
     pub quota: Option<Quota>,
     pub quota_error: Option<String>,
     pub quota_loading: bool,
@@ -291,6 +300,8 @@ impl State {
             collapsed: HashSet::new(),
             harnesses: vec![],
             models: HashMap::new(),
+            trust: HashMap::new(),
+            detail_at: HashMap::new(),
             quota: None,
             quota_error: None,
             quota_loading: false,
@@ -422,6 +433,48 @@ impl State {
         self.spawn(move |c| Msg::Models(h.clone(), c.models(&h)));
     }
 
+    pub fn load_trust(&mut self, root: &str) {
+        if self.trust.contains_key(root) || self.client.is_none() {
+            return;
+        }
+        self.trust.insert(root.to_string(), Err("loading…".into()));
+        let r = root.to_string();
+        self.spawn(move |c| Msg::Trust(r.clone(), c.trust(&r)));
+    }
+
+    pub fn grant_full_access(&mut self, root: &str) {
+        let r = root.to_string();
+        self.spawn(move |c| Msg::Trust(r.clone(), c.grant_full_access(&r).map(Some)));
+    }
+
+    /// The repo's trust state, once loaded.
+    pub fn repo_trust(&self) -> Option<&TrustState> {
+        self.trust.get(&self.effective_root()?)?.as_ref().ok()?.as_ref()
+    }
+
+    /// Access an Agent turn runs with: the explicit pick, else the repo default.
+    pub fn effective_access(&self) -> &'static str {
+        if let Some(a) = self.composer.opts.access {
+            return a;
+        }
+        match self.repo_trust().map(|t| t.access_default.as_str()) {
+            Some("readonly") => "readonly",
+            Some("full") => "full",
+            _ => "workspace_write",
+        }
+    }
+
+    /// Why the Options block Send (bad panel/budget, ungranted full access).
+    pub fn options_error(&self) -> Option<String> {
+        let mode = if self.effective_root().is_none() { "ask" } else { self.current_mode() };
+        let mut probe = TurnRequest::new("", mode);
+        if let Err(e) = self.composer.opts.apply(&mut probe, self.effective_access()) {
+            return Some(e);
+        }
+        let ungranted = mode == "agent" && self.composer.opts.access == Some("full") && !self.repo_trust().is_some_and(|t| t.allow_full_access);
+        ungranted.then(|| "Full access needs a grant for this repo (Options)".into())
+    }
+
     pub fn select(&mut self, id: Option<String>) {
         if self.selected == id {
             return;
@@ -523,6 +576,7 @@ impl State {
             && self.head_live_id().is_none()
             // an attachment the model never saw must never look delivered
             && !self.composer.attachments.iter().any(|a| matches!(a.state, AttachState::Uploading))
+            && self.options_error().is_none()
     }
 
     pub fn submit(&mut self) {
@@ -545,6 +599,10 @@ impl State {
                 _ => None,
             })
             .collect();
+        if let Err(e) = self.composer.opts.apply(&mut req, self.effective_access()) {
+            self.error = Some(e);
+            return;
+        }
         self.send_request(req);
     }
 
@@ -565,6 +623,7 @@ impl State {
                     },
                     mode: Some(mode.into()),
                     primary_harness: self.composer.harness.clone(),
+                    workspace: self.composer.isolated.then(|| "isolated".to_string()),
                 };
                 self.spawn(move |c| Msg::Created(c.create_thread(&create), PendingSend { req }));
             }
@@ -1051,6 +1110,13 @@ impl State {
                         self.run_flight.remove(&rid);
                         self.load_run(&rid, false);
                     }
+                    // Keep an open details section current, at most every 2 s.
+                    let deep = ["gate.", "review.", "plan.progress", "route.", "attempt."].iter().any(|p| kind.starts_with(p));
+                    let due = self.detail_at.get(&rid).is_none_or(|t| t.elapsed() >= Duration::from_secs(2));
+                    if deep && due && self.details.contains_key(&rid) {
+                        self.detail_at.insert(rid.clone(), Instant::now());
+                        self.load_run(&rid, false);
+                    }
                     // Terminal: `output.ready` provably preceded it, so the answer is fetchable.
                     // A replay of an already-answered run must not refetch (or flicker) it.
                     let terminal = matches!(kind.as_str(), "run.completed" | "run.failed" | "run.blocked");
@@ -1117,6 +1183,15 @@ impl State {
                 }
                 Err(e) => self.note(&e),
             },
+            Msg::Trust(root, r) => {
+                match r {
+                    // a failed grant keeps the state we already had
+                    Err(e) if matches!(self.trust.get(&root), Some(Ok(_))) => self.error = Some(format!("Trust: {e}")),
+                    r => {
+                        self.trust.insert(root, r.map_err(|e| e.to_string()));
+                    }
+                }
+            }
             Msg::Models(h, r) => {
                 self.models.insert(h, r.map_err(|e| e.to_string()));
             }

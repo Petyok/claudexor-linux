@@ -461,6 +461,17 @@ impl Client {
         self.post_empty(&format!("setup/jobs/{}/cancel", seg(job_id))).map(|(_, j)| j)
     }
 
+    /// Trust state of one repo; None when it has no trust file yet.
+    pub fn trust(&self, root: &str) -> Result<Option<TrustState>, ApiError> {
+        let list: TrustList = self.get(&format!("trust?repoRoot={}", seg(root)))?;
+        Ok(list.entries.into_iter().find(|e| e.repo_root.as_deref() == Some(root)))
+    }
+
+    /// Grant unsandboxed full access for one repo (recorded in its trust file).
+    pub fn grant_full_access(&self, root: &str) -> Result<TrustState, ApiError> {
+        self.post("trust", serde_json::json!({"repoRoot": root, "allowFullAccess": true})).map(|(_, t)| t)
+    }
+
     pub fn projects(&self) -> Result<ProjectList, ApiError> {
         self.get("projects")
     }
