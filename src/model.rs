@@ -1653,6 +1653,15 @@ pub struct SetupJob {
     pub deadline_fixed: bool,
     #[serde(default)]
     pub outcome: Option<SetupOutcome>,
+    /// The account this login is for (None = the harness default account).
+    #[serde(default)]
+    pub profile_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetupJobList {
+    #[serde(default, deserialize_with = "lossy")]
+    pub jobs: Vec<SetupJob>,
 }
 
 impl SetupJob {

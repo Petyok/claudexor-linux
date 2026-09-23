@@ -361,8 +361,11 @@ impl eframe::App for App {
                                 ui.ctx().copy_text(err.clone());
                             }
                             ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                                // wrap inside the banner: its width minus padding, the alert icon and the two buttons
+                                let text_w = (w - 24.0 - 22.0 - 2.0 * 30.0).max(120.0);
+                                ui.set_max_width(text_w);
                                 let mut job = egui::text::LayoutJob::single_section(err.clone(), egui::TextFormat::simple(FontId::proportional(T_SMALL), t.text));
-                                job.wrap = egui::text::TextWrapping { max_rows: 3, max_width: ui.available_width(), ..Default::default() };
+                                job.wrap = egui::text::TextWrapping { max_rows: 3, max_width: text_w, ..Default::default() };
                                 ui.add(egui::Label::new(job).selectable(true)).on_hover_text(&err);
                             });
                         });

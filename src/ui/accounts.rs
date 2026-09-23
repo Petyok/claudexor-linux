@@ -21,7 +21,7 @@ pub fn show(ctx: &egui::Context, v: &mut View, s: &mut State, anchor_bottom_left
             v.glass.surface(ui, r, R_MD, Kind::Popover);
         }
         let resp = Frame::new().inner_margin(Margin::same(14)).show(ui, |ui| {
-            ui.set_width(380.0);
+            ui.set_width(420.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Accounts & quota").family(semibold()).size(T_BODY + 1.0).color(t.text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -53,7 +53,9 @@ pub fn show(ctx: &egui::Context, v: &mut View, s: &mut State, anchor_bottom_left
                 ui,
                 |ui| {
                     ui.set_width(ui.available_width());
-                    ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| body(ui, &t, s));
+                    // a real minimum: without one egui kept the first frame's ~130 px and clipped the rows
+                    let room = (anchor_bottom_left.y - 180.0).clamp(160.0, 460.0);
+                    ScrollArea::vertical().max_height(room).min_scrolled_height(room).auto_shrink([false, true]).show(ui, |ui| body(ui, &t, s));
                 },
             );
         });
@@ -75,6 +77,7 @@ enum AcctAct {
     Enable(String, String, bool),
     Remove(String, String),
     Add(String, String),
+    CancelLogin(String),
 }
 
 fn body(ui: &mut Ui, t: &Theme, s: &mut State) {
@@ -85,6 +88,7 @@ fn body(ui: &mut Ui, t: &Theme, s: &mut State) {
         Some(AcctAct::Login(h, p)) => s.start_login_for(&h, p),
         Some(AcctAct::Enable(h, p, on)) => s.set_profile_enabled(&h, &p, on),
         Some(AcctAct::Remove(h, p)) => s.delete_profile(&h, &p),
+        Some(AcctAct::CancelLogin(job)) => s.cancel_login_job(&job),
         Some(AcctAct::Add(h, name)) => s.add_account(&h, &name),
         None => {}
     }
@@ -189,7 +193,17 @@ fn account_row(ui: &mut Ui, t: &Theme, s: &State, r: &crate::model::ProfileRow, 
                     ui.ctx().data_mut(|d| d.insert_temp(arm, true));
                 }
             }
-            if !ready && r.profile.enabled && in_app_login(s, &h) {
+            // a login already in flight (possibly started by the CLI): continue it or cancel it
+            if let Some(job) = s.pending_login(&h, &id) {
+                if ui.add_enabled(s.client.is_some(), egui::Button::new(RichText::new("Cancel").size(T_SMALL))).on_hover_text(format!("Cancel sign-in {}", job.job_id)).clicked() {
+                    *act = Some(AcctAct::CancelLogin(job.job_id.clone()));
+                }
+                let b = egui::Button::new(RichText::new("Continue sign-in").size(T_SMALL).color(t.on_accent)).fill(t.accent_solid).corner_radius(8);
+                if ui.add_enabled(!busy && s.client.is_some(), b).on_hover_text("Show the sign-in link for this pending login").clicked() {
+                    *act = Some(AcctAct::Login(h.clone(), Some(id.clone())));
+                }
+            } else if !ready && in_app_login(s, &h) {
+                // offered for switched-off accounts too: signing in and routing are separate
                 let b = egui::Button::new(RichText::new("Log in").size(T_SMALL).color(t.on_accent)).fill(t.accent_solid).corner_radius(8);
                 if ui.add_enabled(!busy && s.client.is_some(), b).on_disabled_hover_text("A sign-in is already in progress").clicked() {
                     *act = Some(AcctAct::Login(h.clone(), Some(id.clone())));

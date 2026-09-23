@@ -70,6 +70,7 @@ pub enum Msg {
     Rewatch(String),
     ThreadChanged(&'static str, Result<Thread, ApiError>),
     Profiles(Result<Profiles, ApiError>),
+    SetupJobs(Result<SetupJobList, ApiError>),
     ProfileChanged(&'static str, Result<(), ApiError>, Option<(String, String)>),
     Picked(Result<Vec<std::path::PathBuf>, String>),
     Uploaded(u64, Result<Resource, String>),
@@ -316,6 +317,8 @@ pub struct State {
     /// The one in-app native login in flight (the daemon allows one per target).
     pub login: Option<Login>,
     pub profiles: Option<Profiles>,
+    /// Logins in flight (any client started them); refreshed with the accounts.
+    pub pending_logins: Vec<SetupJob>,
     /// Sidebar shows the trash instead of live threads.
     pub show_trash: bool,
     /// Turn-finished / needs-you events; main shows them when the window is unfocused.
@@ -417,6 +420,7 @@ impl State {
             engine_version: None,
             login: None,
             profiles: None,
+            pending_logins: vec![],
             show_trash: false,
             notices: vec![],
             engine_starting: false,
@@ -1007,6 +1011,20 @@ impl State {
 
     pub fn refresh_profiles(&mut self) {
         self.spawn(|c| Msg::Profiles(c.profiles()));
+        self.spawn(|c| Msg::SetupJobs(c.active_setup_jobs()));
+    }
+
+    /// The in-flight login for an account, if one exists (from any client).
+    /// A job without a profile belongs to the harness's default account.
+    pub fn pending_login(&self, harness: &str, profile: &str) -> Option<&SetupJob> {
+        let default = profile == format!("{harness}-default");
+        self.pending_logins.iter().find(|j| j.harness == harness && (j.profile_id.as_deref() == Some(profile) || (j.profile_id.is_none() && default)))
+    }
+
+    /// Cancel a login job (e.g. one the CLI left waiting), then refresh.
+    pub fn cancel_login_job(&mut self, job_id: &str) {
+        let id = job_id.to_string();
+        self.spawn(move |c| Msg::ProfileChanged("Cancel sign-in", c.cancel_login(&id).map(drop), None));
     }
 
     pub fn set_profile_enabled(&mut self, harness: &str, profile: &str, enabled: bool) {
@@ -1660,6 +1678,10 @@ impl State {
                 self.refresh_threads();
                 self.refresh_detail();
             }
+            Msg::SetupJobs(r) => match r {
+                Ok(l) => self.pending_logins = l.jobs.into_iter().filter(|j| !j.terminal()).collect(),
+                Err(e) => eprintln!("setup jobs: {e}"),
+            },
             Msg::Profiles(r) => match r {
                 Ok(p) => self.profiles = Some(p),
                 Err(e) => self.note(&e),

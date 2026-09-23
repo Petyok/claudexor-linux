@@ -514,6 +514,11 @@ impl Client {
     }
 
     /// Job + transient sign-in disclosure (URL / one-time code).
+    /// Logins still in flight, including ones the CLI started.
+    pub fn active_setup_jobs(&self) -> Result<SetupJobList, ApiError> {
+        self.get("setup/jobs?active=true")
+    }
+
     pub fn login_snapshot(&self, job_id: &str) -> Result<SetupSnapshot, ApiError> {
         self.get(&format!("setup/jobs/{}/snapshot", seg(job_id)))
     }
